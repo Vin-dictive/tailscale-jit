@@ -37,7 +37,9 @@ func demoFlows() []jit.Workflow {
 	return []jit.Workflow{
 		{Name: "Database access (read-only)", Description: "SELECT on the production databases and the logs", Attribute: "db_ro",
 			Resources: []jit.Resource{mysql1, mysql2, logs}, Requesters: member, Approvers: sre,
-			MaxDuration: h(4), DefaultDuration: h(1), Slack: &jit.WorkflowSlack{Channel: "C0SREONCALL", ChannelName: "sre-oncall"}},
+			MaxDuration: h(4), DefaultDuration: h(1),
+			Slack: &jit.WorkflowSlack{Channel: "C0SREONCALL", ChannelName: "sre-oncall"},
+			Teams: &jit.WorkflowTeams{Channel: "19:sre-oncall@thread.tacv2", ChannelName: "sre-oncall", TeamID: "19:engineering@thread.tacv2"}},
 		{Name: "Database access (read-write)", Description: "Writes to production; two approvals", Attribute: "db_rw",
 			Resources: []jit.Resource{mysql1, mysql2}, Requesters: member, Approvers: []jit.Principal{"group:sre", "leo.park@example.com"}, ApprovalsRequired: 2,
 			MaxDuration: h(1), DefaultDuration: jit.Duration(30 * time.Minute)},
@@ -51,11 +53,13 @@ func demoFlows() []jit.Workflow {
 			Resources:  []jit.Resource{{Name: "tag:prod", Description: "All production hosts"}},
 			Requesters: sre, Approvers: []jit.Principal{"group:sre", "leo.park@example.com"}, ApprovalsRequired: 2,
 			MaxDuration: h(1), DefaultDuration: jit.Duration(30 * time.Minute),
-			Slack: &jit.WorkflowSlack{Channel: "G0SECURITY0", ChannelName: "security", BrowserOnly: true}},
+			Slack: &jit.WorkflowSlack{Channel: "G0SECURITY0", ChannelName: "security", BrowserOnly: true},
+			Teams: &jit.WorkflowTeams{Channel: "19:security@thread.tacv2", ChannelName: "security", TeamID: "19:engineering@thread.tacv2", BrowserOnly: true}},
 		{Name: "Kubernetes (read-only)", Description: "kubectl get, describe and logs on the production cluster", Attribute: "k8s_ro",
 			Resources:  []jit.Resource{{Name: "svc:kubernetes-prod-cluster", Description: "Production cluster API (EKS, us-east-1)"}},
 			Requesters: member, Approvers: sre, MaxDuration: h(8), DefaultDuration: h(2),
-			Slack: &jit.WorkflowSlack{Channel: "C0SREONCALL", ChannelName: "sre-oncall", DMApprovers: true}},
+			Slack: &jit.WorkflowSlack{Channel: "C0SREONCALL", ChannelName: "sre-oncall", DMApprovers: true},
+			Teams: &jit.WorkflowTeams{Channel: "19:sre-oncall@thread.tacv2", ChannelName: "sre-oncall", TeamID: "19:engineering@thread.tacv2", DMApprovers: true}},
 	}
 }
 

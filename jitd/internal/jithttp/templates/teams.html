@@ -1,0 +1,136 @@
+{{define "content"}}
+{{$d := .Data}}{{$st := $d.Status}}
+<div class="head">
+  <div>
+    <h1>Microsoft Teams {{if $st.Configured}}{{if $st.Connected}}<span class="status approved">connected</span>{{else if eq $st.State "error"}}<span class="status declined">not connected</span>{{else}}<span class="status pending">{{$st.State}}</span>{{end}}{{end}}</h1>
+    <p class="sub">Announce access requests in Teams and let approvers decide from the card. jitd connects out to Teams; Teams never connects to jitd, so jitd stays on the tailnet.</p>
+  </div>
+</div>
+
+{{if not $st.Configured}}
+<div class="grid2 wide-left">
+<div>
+<section class="card prose">
+  <h2>Connect Microsoft Teams</h2>
+  <ol class="steps">
+    <li><b>Register the app in Entra.</b> In the <a href="https://entra.microsoft.com/" target="_blank" rel="noopener">Microsoft Entra admin centre</a>, go to <b>App registrations → New registration</b>, name it <i>JIT access</i> and pick <b>Accounts in this organizational directory only</b>. Copy the <b>Application (client) ID</b> and the <b>Directory (tenant) ID</b>. Then under <b>Certificates &amp; secrets → Client secrets → New client secret</b>, copy the secret's <b>Value</b> (not its ID; the value is shown once).</li>
+    <li><b>Create the bot and turn on socket mode.</b> In the <a href="https://dev.teams.microsoft.com/bots" target="_blank" rel="noopener">Teams Developer Portal</a>, under <b>Tools → Bot management</b>, create a bot using the app ID above. Open it, choose <b>Configure</b>, and under <b>Delivery method</b> pick <b>Socket mode</b>. Socket mode is only available for newly created bots.</li>
+    <li><b>Fill these in.</b>
+      <form class="form slackform" data-form="teams-connect">
+        <label>Application (client) ID <input name="app_id" autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000" required></label>
+        <label>Client secret value <input name="app_password" type="password" autocomplete="off" required></label>
+        <label>Directory (tenant) ID <input name="tenant_id" autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000" required></label>
+        <label>Allowed email domains
+          <input name="allowed_domains" value="{{$d.Domain}}" placeholder="example.com" required>
+          <span class="hint">Someone in Teams is matched to a Tailscale login by their work address, and only if it is in one of these domains (comma-separated).</span>
+        </label>
+        <div class="actions"><button class="btn primary" type="submit">Connect</button></div>
+      </form>
+    </li>
+    <li><b>Install the app in a team.</b> Once connected, download the app package below and upload it in Teams (<b>Apps → Manage your apps → Upload a custom app</b>), then add it to a team. Uploading custom apps has to be allowed in the Teams admin centre.</li>
+  </ol>
+  <p class="muted small">The client secret is kept in jitd's database and is never shown again, here or in the API. To keep it out of the database, put <code>TEAMS_APP_ID</code>, <code>TEAMS_APP_PASSWORD</code> and <code>TEAMS_TENANT_ID</code> (and <code>TEAMS_ALLOWED_DOMAINS</code>) in <code>{{$st.EnvFile}}</code> instead and restart jitd.</p>
+</section>
+</div>
+<div>{{template "teamshow" .}}</div>
+</div>
+
+{{else}}
+{{if $st.Connected}}
+<div class="flash ok" style="display:block">Connected in every region, {{ago $st.Since}}.</div>
+{{else if eq $st.State "error"}}
+<div class="flash error" style="display:block">jitd can't reach Teams: {{$st.LastError}}. It keeps retrying unless the credentials or socket mode need fixing. Requests and approvals in the browser are not affected.</div>
+{{end}}
+{{if not $st.Installed}}
+<div class="flash error" style="display:block">The JIT access app is not installed in any team yet, so there is nowhere to post. <a href="{{$d.ManifestPath}}">Download the app package</a> and upload it in Teams.</div>
+{{end}}
+
+<div class="grid2 wide-left">
+<div>
+<section class="card">
+  <div class="cardhead"><h2>Approval flows</h2><span class="muted small">Set the channel on each flow's page.</span></div>
+  {{with $d.CheckErr}}<div class="error">Could not check with Teams: {{.}}</div>{{end}}
+  <table class="plain slackflows">
+    {{range $d.Flows}}
+    <tr>
+      <td class="nowrap"><a href="/admin/workflows/{{.WorkflowID}}"><b>{{.WorkflowName}}</b></a>
+        <div class="muted small">{{if .Channel}}{{or .ChannelName .Channel}}{{else}}no channel{{end}}{{if .DMApprovers}} · DMs to approvers{{end}}{{if .BrowserOnly}} · browser only{{end}}</div>
+        {{with .ChannelIssue}}<div class="warn small">⚠ {{.}}</div>{{end}}
+      </td>
+      <td>
+        {{range .Approvers}}<div class="small">{{.Login}} {{if .Problem}}<span class="warn">⚠ {{.Problem}}</span>{{else}}<span class="muted">→ {{.TeamsUser}}</span> <span class="ok">✓</span>{{end}}</div>{{end}}
+        {{if .Members}}<div class="small muted">autogroup:member: anyone on the tailnet; from Teams too, if their work address is their Tailscale login</div>{{end}}
+        {{range .OtherApprovers}}<div class="small muted">{{.}}: approves in the browser only</div>{{end}}
+        {{with .ApproverIssue}}<div class="warn small">⚠ {{.}}</div>{{end}}
+        {{if and (not .Approvers) (not .OtherApprovers) (not .Members)}}<span class="muted small">no approvers</span>{{end}}
+      </td>
+    </tr>
+    {{else}}
+    <tr><td class="muted">No approval flows yet.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted small">Each approver is matched to a Teams account by their work address, read from the roster of the teams the app is installed in; the login must also own a device on the tailnet. A ⚠ means that person can't decide from Teams (they still can in the browser).</p>
+</section>
+
+<section class="card">
+  <h2>Send a test message</h2>
+  <form class="actions" data-form="teams-test">
+    <select name="channel" class="grow" required>
+      <option value="">Pick a channel…</option>
+      {{range $d.Channels}}<option value="{{.ID}}">{{with .TeamName}}{{.}} / {{end}}{{.Name}}</option>{{end}}
+    </select>
+    <button class="btn" type="submit">Send</button>
+  </form>
+  <p class="muted small">Only channels of teams the JIT access app is installed in are listed.</p>
+</section>
+</div>
+
+<div>
+<section class="card">
+  <h2>Connection</h2>
+  <table class="plain">
+    <tr><td>App ID</td><td><code>{{$st.AppID}}</code></td></tr>
+    <tr><td>Tenant</td><td><code>{{$st.TenantID}}</code></td></tr>
+    <tr><td>Sockets</td><td>
+      {{range $st.Geos}}<div class="small">{{.Geo}}: {{if eq .State "connected"}}<span class="ok">✓ connected</span>{{else}}<span class="warn">{{.State}}{{with .LastError}} — {{.}}{{end}}</span>{{end}}</div>{{end}}
+      {{if not $st.Since.IsZero}}<div class="muted small">{{ago $st.Since}}</div>{{end}}
+      <div class="muted small">Teams delivers from three regions; jitd connects to all of them, or it misses conversations hosted in the others.</div>
+    </td></tr>
+    <tr><td>Secret</td><td><code>…{{$st.PasswordHint}}</code><div class="muted small">{{if eq $st.Source "env"}}from {{$st.EnvFile}}{{else}}saved here{{if $st.ConnectedBy}} by {{$st.ConnectedBy}}, {{ago $st.ConnectedAt}}{{end}}{{end}}</div></td></tr>
+    <tr><td>Installed in</td><td>
+      {{range $st.Installed}}<div class="small">{{or .Name .ID}}</div>{{else}}<span class="muted small">no teams yet</span>{{end}}
+    </td></tr>
+  </table>
+  <p><a class="btn sm" href="{{$d.ManifestPath}}">Download the app package</a>
+    <span class="muted small">Upload it in Teams: Apps → Manage your apps → Upload a custom app.</span></p>
+  <form class="form slackform" data-form="teams-domains">
+    <label>Allowed email domains
+      <input name="allowed_domains" value="{{join $st.AllowedDomains}}" required>
+      <span class="hint">Teams users are matched to Tailscale logins by their work address, only in these domains.</span>
+    </label>
+    <div class="actions"><button class="btn sm" type="submit">Save domains</button>
+    {{if ne $st.Source "env"}}<button class="btn sm danger right-push" type="button" id="teamsdisconnect">Disconnect</button>{{end}}</div>
+  </form>
+  {{if eq $st.Source "env"}}<p class="muted small">Set up in <code>{{$st.EnvFile}}</code>; change or remove it there and restart jitd.</p>{{end}}
+  <p class="muted small">Disconnecting makes jitd forget the secret, but Microsoft has no way to revoke one: delete it in Entra as well.</p>
+</section>
+{{template "teamshow" .}}
+</div>
+</div>
+{{end}}
+{{end}}
+
+{{define "teamshow"}}
+<section class="card prose">
+  <h2>How it works</h2>
+  <ul>
+    <li>Each approval flow can post new requests to a channel, and send each approver a direct message. The card updates itself as the request is approved, declined, expires or is revoked.</li>
+    <li><b>Approve</b> and <b>Decline</b> in Teams run the same checks as the browser: who may approve, no self-approval unless the flow allows it, how many approvals it needs. Revoking stays in the browser. Decline asks for a reason in the card itself, and only the person who pressed it sees that form.</li>
+    <li>In the browser, Tailscale says who you are. In Teams, jitd goes by your work address: you must be a member of the connected tenant (not a guest), your address must be in an allowed domain and must be your Tailscale login, and that login must own a device on the tailnet. Decisions made this way are marked <i>via Teams</i> on the request, with the account that made them.</li>
+    <li>For a flow that should only be decided in the browser, turn on <b>Browser only</b> on its page: its cards then carry no buttons.</li>
+    <li>Message the bot (or <span class="nowrap">@mention</span> it in a channel) with <code>status</code> to see what is waiting for you and your own requests, <code>request</code> to ask for access, or <code>help</code> for the list. <code>/jit</code> in front is optional.</li>
+    <li><b>Direct messages only reach people the app can see.</b> Teams has no way to look somebody up by address, so jitd reads the rosters of the teams the app is installed in. An approver in none of them is listed with a ⚠ and gets no direct message; the channel post and the browser still reach them.</li>
+    <li><b>Socket mode is in public preview</b> and only available for newly created bots. Microsoft recommends an HTTPS endpoint for production. jitd uses socket mode because it is what keeps jitd off the public internet.</li>
+  </ul>
+</section>
+{{end}}

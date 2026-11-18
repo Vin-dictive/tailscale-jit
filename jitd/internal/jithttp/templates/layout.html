@@ -23,7 +23,7 @@
     <a href="/admin/requests" {{if eq .Nav "admin-requests"}}class="on"{{end}}>All requests</a>
     <a href="/admin/workflows" {{if eq .Nav "admin-workflows"}}class="on"{{end}}>Approval flows</a>
     <a href="/admin/policy" {{if eq .Nav "admin-policy"}}class="on"{{end}}>Policy snippet</a>
-    <a href="/admin/integrations" {{if eq .Nav "admin-integrations"}}class="on"{{end}}>Integrations{{if or .SetupBad .OktaDot .GoogleDot .SlackBad}} <span class="dot bad" title="An integration needs a look"></span>{{end}}</a>
+    <a href="/admin/integrations" {{if eq .Nav "admin-integrations"}}class="on"{{end}}>Integrations{{if or .SetupBad .OktaDot .GoogleDot .SlackBad .TeamsBad}} <span class="dot bad" title="An integration needs a look"></span>{{end}}</a>
     <a href="/api/docs">API docs</a>
     {{end}}
   </nav>

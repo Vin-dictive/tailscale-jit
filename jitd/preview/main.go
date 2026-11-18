@@ -36,6 +36,8 @@ import (
 	"github.com/atoonk/tailscale-jit/jitd/internal/setup"
 	"github.com/atoonk/tailscale-jit/jitd/internal/slack"
 	"github.com/atoonk/tailscale-jit/jitd/internal/slackbot"
+	"github.com/atoonk/tailscale-jit/jitd/internal/teams"
+	"github.com/atoonk/tailscale-jit/jitd/internal/teamsbot"
 	"github.com/atoonk/tailscale-jit/jitd/internal/tsapi"
 )
 
@@ -126,6 +128,7 @@ func main() {
 	baseURL := flag.String("base-url", "", "base URL used in approval links (default http://<listen>)")
 	defaultWho := flag.String("default", "", "person to assume when a request has no who cookie (e.g. so an MCP client can talk to the preview)")
 	slackConnected := flag.Bool("slack", true, "start with a made-up Slack workspace connected (false: the Slack page shows the setup steps)")
+	teamsConnected := flag.Bool("teams", true, "start with a made-up Microsoft Teams tenant connected (false: the Teams page shows the setup steps)")
 	tsMode := flag.String("tailscale", "page", "how the Tailscale API credential is set up: page (saved on the Tailscale page), env (in the env file), off (the page shows the setup steps); a client secret starting with tskey-client-wrong is refused")
 	oktaMode := flag.String("okta", "page", "how the made-up Okta org is set up: page (credentials saved on the Okta page), env (set in the env file, with allowlists), off (the Okta page shows the setup steps), failing (saved on the page, but Okta refuses them)")
 	googleMode := flag.String("google", "page", "how the made-up Google account is set up: page (key saved on the Google Groups page), env (key in the env file), off (the page shows the setup steps), failing (saved on the page, but the service account has lost its role); a pasted key for an account starting with norole@ is taken, as Google takes it, and sees no groups")
@@ -248,13 +251,45 @@ func main() {
 	fs.AddChannel("G0SECURITY0", "security", true)
 	bot := &slackbot.Bot{Svc: svc, Log: log, BaseURL: base, EnvFile: filepath.Join(dir, "env"),
 		NewAPI: func(string, string) slack.API { return fs }, Dial: fs.Dial}
-	svc.Notify = bot
+
+	// A made-up Microsoft Teams tenant, the same cast in one team.
+	tf := teams.NewFake()
+	var memberIDs []string
+	for name, p := range people {
+		tf.AddUser("29:"+name, "aad-"+name, p.Login, p.DisplayName)
+		memberIDs = append(memberIDs, "29:"+name)
+	}
+	const previewTeam = "19:engineering@thread.tacv2"
+	tf.AddTeam(previewTeam,
+		teams.Channel{ID: previewTeam},
+		teams.Channel{ID: "19:sre-oncall@thread.tacv2", Name: "sre-oncall"},
+		teams.Channel{ID: "19:jit-approvals@thread.tacv2", Name: "jit-approvals"},
+		teams.Channel{ID: "19:security@thread.tacv2", Name: "security"})
+	tf.SetRoster(previewTeam, memberIDs...)
+	tbot := &teamsbot.Bot{Svc: svc, Log: log, BaseURL: base, EnvFile: filepath.Join(dir, "env"),
+		NewAPI:     func(string, string, string) teams.API { return tf },
+		NewInbound: func(_ teams.API, h teams.Handler) teams.Inbound { return tf.Inbound(h) }}
+
+	svc.Notify = jit.Notifiers{bot, tbot}
 	bot.Start(context.Background())
+	tbot.Start(context.Background())
+	admin := jit.Identity{Login: string(admins[0])}
 	if *slackConnected {
-		admin := jit.Identity{Login: string(admins[0])}
 		if _, err := bot.Connect(context.Background(), admin, slackbot.ConnectInput{
 			BotToken: "xoxb-preview-0000", AppToken: "xapp-preview-0000", AllowedDomains: []string{"example.com"}}); err != nil {
 			log.Error("preview slack", "err", err)
+		}
+	}
+	if *teamsConnected {
+		if _, err := tbot.Connect(context.Background(), admin, teamsbot.ConnectInput{
+			AppID:       "00000000-aaaa-bbbb-cccc-000000000001",
+			AppPassword: "preview-secret-0000",
+			TenantID:    tf.TenantID, AllowedDomains: []string{"example.com"}}); err != nil {
+			log.Error("preview teams", "err", err)
+		}
+		// Tell the bot the app is installed, as ACS would on install.
+		if sock := tf.Socket(); sock != nil {
+			sock.Deliver(context.Background(), tf.InstalledIn(previewTeam, "Engineering", previewTeam))
 		}
 	}
 	if *demo {
@@ -310,7 +345,7 @@ func main() {
 	}
 
 	h := &jithttp.Server{
-		Svc: svc, TS: ts, Setup: checker, Slack: bot, Okta: oktaSetup, Google: googleSetup, JITTag: "tag:jit", BaseURL: base, Log: log,
+		Svc: svc, TS: ts, Setup: checker, Slack: bot, Teams: tbot, Okta: oktaSetup, Google: googleSetup, JITTag: "tag:jit", BaseURL: base, Log: log,
 		Resolver: jit.ResolverFunc(func(ctx context.Context, r *http.Request) (jit.Identity, error) {
 			c, _ := r.Cookie("who")
 			if c != nil {

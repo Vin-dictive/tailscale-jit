@@ -18,6 +18,7 @@ import (
 	"github.com/atoonk/tailscale-jit/jitd/internal/setup"
 	"github.com/atoonk/tailscale-jit/jitd/internal/slack"
 	"github.com/atoonk/tailscale-jit/jitd/internal/slackbot"
+	"github.com/atoonk/tailscale-jit/jitd/internal/teamsbot"
 )
 
 //go:embed templates/*.html
@@ -134,6 +135,13 @@ func init() {
 			}
 			return map[string]any{"F": f, "Current": cur}
 		},
+		"teamsform": func(w *jit.Workflow, f *teamsField) map[string]any {
+			cur := w.Teams
+			if cur == nil {
+				cur = &jit.WorkflowTeams{}
+			}
+			return map[string]any{"F": f, "Current": cur}
+		},
 	}
 	base := template.Must(template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html"))
 	entries, _ := fs.Glob(templateFS, "templates/*.html")
@@ -209,6 +217,7 @@ type flowRow struct {
 	Flow   *jit.Workflow
 	Policy *jit.PolicyUse
 	Slack  *slackField // nil: no Slack integration in this build
+	Teams  *teamsField // nil: no Teams integration in this build
 	Okta   bool        // Okta credentials are configured
 	// OktaPage: there is an Okta page to send the admin to when they are not.
 	OktaPage bool
@@ -220,7 +229,7 @@ type flowRow struct {
 // flowRow builds the flow form's data for w.
 func (s *Server) flowForm(r *http.Request, w *jit.Workflow, policy *jit.PolicyUse) flowRow {
 	return flowRow{
-		Flow: w, Policy: policy, Slack: s.slackField(r, w),
+		Flow: w, Policy: policy, Slack: s.slackField(r, w), Teams: s.teamsField(r, w),
 		Okta: s.Svc.OktaEnabled(), OktaPage: s.Okta != nil,
 		Google: s.Svc.GoogleEnabled(), GooglePage: s.Google != nil,
 	}
@@ -255,6 +264,39 @@ func (s *Server) slackField(r *http.Request, w *jit.Workflow) *slackField {
 	return f
 }
 
+// teamsField fills the Microsoft Teams part of the flow form.
+type teamsField struct {
+	Connected bool
+	Channels  []teamsbot.Channel
+	Error     string // the channels could not be listed
+	// Installed says the app is in at least one team. Without that there is
+	// nothing to pick, however well the credentials work.
+	Installed bool
+	// Missing is the flow's channel when it is not among Channels (deleted,
+	// or the app was removed from its team).
+	Missing string
+}
+
+// teamsField builds the flow form's Teams part for w.
+func (s *Server) teamsField(r *http.Request, w *jit.Workflow) *teamsField {
+	if s.Teams == nil {
+		return nil
+	}
+	st := s.Teams.Status()
+	f := &teamsField{Connected: st.Configured(), Installed: len(st.Installed) > 0}
+	if f.Connected {
+		cs, err := s.Teams.Channels(r.Context())
+		if err != nil {
+			f.Error = err.Error()
+		}
+		f.Channels = cs
+	}
+	if w.Teams != nil && w.Teams.Channel != "" && !slices.ContainsFunc(f.Channels, func(c teamsbot.Channel) bool { return c.ID == w.Teams.Channel }) {
+		f.Missing = w.Teams.Channel
+	}
+	return f
+}
+
 type page struct {
 	Title     string
 	Nav       string
@@ -267,6 +309,8 @@ type page struct {
 	SetupBad  bool   // the last setup check failed: marks the Setup link (admins)
 	SlackOn   bool   // the build has the Slack integration (admins see its page)
 	SlackBad  string // Slack is set up but not connected: why (marks the Slack link)
+	TeamsOn   bool   // the build has the Teams integration (admins see its page)
+	TeamsBad  string // Teams is set up but not connected: why (marks its tab)
 	OktaOn    bool   // there is an Okta page (admins)
 	OktaDot   bool   // something is wrong with Okta (admins): the dot on its tab
 	GoogleOn  bool   // there is a Google page (admins)
@@ -305,6 +349,13 @@ func (p *page) tabs() []tab {
 		t := tab{Key: "slack", Label: "Slack"}
 		if p.SlackBad != "" {
 			t.Bad = "Slack is not connected: " + p.SlackBad
+		}
+		out = append(out, t)
+	}
+	if p.TeamsOn {
+		t := tab{Key: "teams", Label: "Microsoft Teams"}
+		if p.TeamsBad != "" {
+			t.Bad = "Teams is not connected: " + p.TeamsBad
 		}
 		out = append(out, t)
 	}
@@ -353,6 +404,9 @@ func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int
 		}
 		if p.Admin && s.Slack != nil {
 			p.SlackOn, p.SlackBad = true, s.Slack.Problem()
+		}
+		if p.Admin && s.Teams != nil {
+			p.TeamsOn, p.TeamsBad = true, s.Teams.Problem()
 		}
 		if p.Admin {
 			p.OktaOn, p.GoogleOn = s.Okta != nil, s.Google != nil
@@ -447,7 +501,7 @@ func (s *Server) webRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/integrations", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/integrations/tailscale", http.StatusFound)
 	})
-	for old, tab := range map[string]string{"/admin/setup": "tailscale", "/admin/slack": "slack", "/admin/okta": "okta"} {
+	for old, tab := range map[string]string{"/admin/setup": "tailscale", "/admin/slack": "slack", "/admin/okta": "okta", "/admin/teams": "teams"} {
 		mux.HandleFunc("GET "+old, func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/admin/integrations/"+tab, http.StatusMovedPermanently)
 		})
@@ -465,6 +519,29 @@ func (s *Server) webRoutes(mux *http.ServeMux) {
 			return
 		}
 		s.renderAdmin(w, r, "slack", "Slack", "integrations/slack", s.slackPage(r, id))
+	}))
+	mux.HandleFunc("GET /admin/integrations/teams", s.adminPage(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		if s.Teams == nil {
+			s.notFound(w, r, &jit.Error{Code: "not_found", Status: 404, Message: "no Teams integration in this build"})
+			return
+		}
+		s.renderAdmin(w, r, "teams", "Microsoft Teams", "integrations/teams", s.teamsPage(r, id))
+	}))
+	// The app package an admin uploads to Teams. It is built from the
+	// connection's own app ID, so it is served, not a static file.
+	mux.HandleFunc("GET "+teamsbot.ManifestPath, s.adminPage(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
+		if s.Teams == nil {
+			s.notFound(w, r, &jit.Error{Code: "not_found", Status: 404, Message: "no Teams integration in this build"})
+			return
+		}
+		zip, err := s.Teams.AppPackage()
+		if err != nil {
+			s.notFound(w, r, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="jit-access-teams-app.zip"`)
+		w.Write(zip)
 	}))
 	mux.HandleFunc("GET /admin/integrations/okta", s.adminPage(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
 		if s.Okta == nil {
@@ -517,7 +594,7 @@ func (s *Server) webRoutes(mux *http.ServeMux) {
 				nav = "admin-requests"
 			}
 		}
-		s.render(w, r, "request", "Access request", nav, map[string]any{"R": req, "Can": s.Svc.Permissions(r.Context(), id, req), "SlackNote": s.slackNote(req)})
+		s.render(w, r, "request", "Access request", nav, map[string]any{"R": req, "Can": s.Svc.Permissions(r.Context(), id, req), "SlackNote": s.slackNote(req), "TeamsNote": s.teamsNote(req)})
 	})
 	mux.HandleFunc("GET /help", func(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "help", "Help", "help", map[string]any{"MCPURL": s.base() + "/mcp", "AllowHTTP": strings.HasPrefix(s.base(), "http://")})
@@ -547,6 +624,35 @@ func (s *Server) slackPage(r *http.Request, admin jit.Identity) slackPageData {
 		}
 		d.Flows = fcs
 		d.Channels, _ = s.Slack.Channels(r.Context())
+	}
+	return d
+}
+
+// teamsPageData fills the Microsoft Teams page.
+type teamsPageData struct {
+	Status   teamsbot.Status
+	Flows    []teamsbot.FlowCheck
+	CheckErr string
+	Channels []teamsbot.Channel
+	// Domain is the admin's own email domain, the first guess for the
+	// allowed domains.
+	Domain string
+	// ManifestPath is where the app package is downloaded from.
+	ManifestPath string
+}
+
+func (s *Server) teamsPage(r *http.Request, admin jit.Identity) teamsPageData {
+	d := teamsPageData{Status: s.Teams.Status(), ManifestPath: teamsbot.ManifestPath}
+	if _, dom, ok := strings.Cut(admin.Login, "@"); ok {
+		d.Domain = strings.ToLower(dom)
+	}
+	if d.Status.Configured() {
+		fcs, err := s.Teams.Check(r.Context())
+		if err != nil {
+			d.CheckErr = err.Error()
+		}
+		d.Flows = fcs
+		d.Channels, _ = s.Teams.Channels(r.Context())
 	}
 	return d
 }
@@ -662,4 +768,13 @@ func (s *Server) slackNote(req *jit.AccessRequest) string {
 		return ""
 	}
 	return s.Slack.RequestNote(req)
+}
+
+// teamsNote says why a pending request is missing from its flow's Teams
+// channel, or "".
+func (s *Server) teamsNote(req *jit.AccessRequest) string {
+	if s.Teams == nil {
+		return ""
+	}
+	return s.Teams.RequestNote(req)
 }

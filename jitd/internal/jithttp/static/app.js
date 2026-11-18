@@ -128,6 +128,7 @@ function workflowBody(f) {
     approvals_required: Number(f.approvals_required.value),
     disabled: !f.enabled.checked,
     slack: slackBody(f),
+    teams: teamsBody(f),
   };
 }
 
@@ -158,6 +159,22 @@ function slackBody(f) {
   };
 }
 
+// teamsBody reads the flow form's Microsoft Teams part (absent in builds
+// without it). A Teams channel carries the team it belongs to: the roster
+// that direct messages need is read from the team, not the channel.
+function teamsBody(f) {
+  const ch = f.teams_channel;
+  if (!ch) return undefined;
+  const opt = ch.selectedOptions[0];
+  return {
+    channel: ch.value,
+    channel_name: (opt && opt.dataset.name) || "",
+    team_id: (opt && opt.dataset.team) || "",
+    dm_approvers: f.teams_dm.checked,
+    browser_only: f.teams_browser_only.checked,
+  };
+}
+
 document.addEventListener("submit", async (ev) => {
   const f = ev.target;
   if (!f.dataset.form) return;
@@ -180,6 +197,18 @@ document.addEventListener("submit", async (ev) => {
     } else if (f.dataset.form === "slack-test") {
       await api("POST", "/v1/slack/test", { channel: f.channel.value });
       flash("Sent. Have a look in Slack.", true);
+    } else if (f.dataset.form === "teams-connect") {
+      await api("POST", "/v1/teams/connect", {
+        app_id: f.app_id.value.trim(), app_password: f.app_password.value.trim(),
+        tenant_id: f.tenant_id.value.trim(), allowed_domains: list(f.allowed_domains.value),
+      });
+      location.reload();
+    } else if (f.dataset.form === "teams-domains") {
+      await api("PUT", "/v1/teams/domains", { allowed_domains: list(f.allowed_domains.value) });
+      flash("Saved.", true);
+    } else if (f.dataset.form === "teams-test") {
+      await api("POST", "/v1/teams/test", { channel: f.channel.value });
+      flash("Sent. Have a look in Teams.", true);
     } else if (f.dataset.form === "okta-save") {
       await credSave(f, "/v1/okta", "Signing in to Okta…");
     } else if (f.dataset.form === "ts-save") {
@@ -661,23 +690,26 @@ for (const kind of ["okta", "google"]) (() => {
   });
 })();
 
-// Slack page: disconnect, with a second click to confirm.
+// Integrations pages: disconnect, with a second click to confirm. One
+// button per chat integration; only the one on the open page is there.
 (() => {
-  const b = document.getElementById("slackdisconnect");
-  if (!b) return;
-  b.addEventListener("click", async () => {
-    if (b.dataset.armed !== "1") {
-      b.dataset.armed = "1";
-      b.textContent = "Click again to disconnect";
-      return;
-    }
-    b.disabled = true;
-    try {
-      await api("POST", "/v1/slack/disconnect");
-      location.reload();
-    } catch (e) {
-      flash(e.message);
-      b.disabled = false;
-    }
-  });
+  for (const [id, path] of [["slackdisconnect", "/v1/slack/disconnect"], ["teamsdisconnect", "/v1/teams/disconnect"]]) {
+    const b = document.getElementById(id);
+    if (!b) continue;
+    b.addEventListener("click", async () => {
+      if (b.dataset.armed !== "1") {
+        b.dataset.armed = "1";
+        b.textContent = "Click again to disconnect";
+        return;
+      }
+      b.disabled = true;
+      try {
+        await api("POST", path);
+        location.reload();
+      } catch (e) {
+        flash(e.message);
+        b.disabled = false;
+      }
+    });
+  }
 })();

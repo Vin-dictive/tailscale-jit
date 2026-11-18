@@ -36,6 +36,7 @@
   {{if $r.Resources}}<ul class="resources">{{range $r.Resources}}<li><code>{{.Name}}</code>{{with .Description}} <span class="muted">{{.}}</span>{{end}}</li>{{end}}</ul>{{end}}
   {{with $r.LastError}}<div class="error">Last error: {{.}}</div>{{end}}
   {{with .Data.SlackNote}}<div class="warn small">⚠ {{.}}</div>{{end}}
+  {{with .Data.TeamsNote}}<div class="warn small">⚠ {{.}}</div>{{end}}
   {{if or $can.Approve (and $can.Decline (not $self)) $can.Revoke}}
   <div class="actions decide">
     <input id="note" placeholder="{{if $can.Decline}}Note · required to decline{{else}}Add a note (optional){{end}}" class="grow">
@@ -61,7 +62,7 @@
       <li class="ev-{{.Type}}">
         <i></i>
         <div>
-          <b>{{.Actor}}</b> {{if eq .Type "submitted"}}requested access{{else if eq .Type "approval"}}approved{{else if eq .Type "approve_failed"}}tried to approve{{else if eq .Type "revoke_failed"}}tried to revoke{{else if eq .Type "started"}}started the scheduled access{{else if eq .Type "start_failed"}}could not start the scheduled access{{else}}{{.Type}}{{end}}{{if eq .Via "slack"}} <span class="via" title="Identified by their Slack account's email, not by Tailscale{{with .SlackUser}} · Slack account {{.}}{{end}}">via Slack</span>{{end}}
+          <b>{{.Actor}}</b> {{if eq .Type "submitted"}}requested access{{else if eq .Type "approval"}}approved{{else if eq .Type "approve_failed"}}tried to approve{{else if eq .Type "revoke_failed"}}tried to revoke{{else if eq .Type "started"}}started the scheduled access{{else if eq .Type "start_failed"}}could not start the scheduled access{{else}}{{.Type}}{{end}}{{if eq .Via "slack"}} <span class="via" title="Identified by their Slack account's email, not by Tailscale{{with .SlackUser}} · Slack account {{.}}{{end}}">via Slack</span>{{end}}{{if eq .Via "teams"}} <span class="via" title="Identified by their Teams work address, not by Tailscale{{with .TeamsUser}} · Teams account {{.}}{{end}}">via Teams</span>{{end}}
           <span class="meta" title="{{ts .At}}">{{ago .At}}</span>
           {{with .Note}}<div class="note">{{.}}</div>{{end}}
         </div>
@@ -78,7 +79,7 @@
       <dt>Duration</dt><dd>{{human $r.Duration}}</dd>
       {{with $r.StartAt}}<dt>Starts</dt><dd>{{ts .}}</dd>{{end}}
       {{with $r.ExpiresAt}}<dt>Ends</dt><dd>{{ts .}}</dd>{{end}}
-      {{if gt $r.ApprovalsRequired 1}}<dt>Approvals</dt><dd>{{$r.ApprovalsCounted}} of {{$r.ApprovalsRequired}}{{range $r.Approvals}}<div class="muted small">{{.Actor}}{{if eq .Via "slack"}} (via Slack){{end}} · {{ago .At}}</div>{{end}}</dd>{{end}}
+      {{if gt $r.ApprovalsRequired 1}}<dt>Approvals</dt><dd>{{$r.ApprovalsCounted}} of {{$r.ApprovalsRequired}}{{range $r.Approvals}}<div class="muted small">{{.Actor}}{{if eq .Via "slack"}} (via Slack){{end}}{{if eq .Via "teams"}} (via Teams){{end}} · {{ago .At}}</div>{{end}}</dd>{{end}}
       {{if and $.Admin $r.Attribute}}<dt>Device attribute</dt><dd><code>{{$r.Attribute}}</code> <a href="/v1/devices/{{$r.TargetDeviceID}}/attributes" class="small">check</a></dd>{{end}}
       {{range $g := $r.GroupSets}}{{with $g.Grant}}<dt>{{$g.Label}} user</dt><dd>{{.Login}}{{if and $.Admin (ne .UserID .Login)}} <code class="small">{{.UserID}}</code>{{end}}{{if .Preexisting}}<div class="muted small">{{len .Preexisting}} group(s) already held outside jitd; left as they were</div>{{end}}</dd>{{end}}{{end}}
       <dt>Request ID</dt><dd><code>{{$r.ID}}</code></dd>
