@@ -958,6 +958,64 @@ send each approver a direct message.
 - If Slack is down or jitd was, nothing is lost: requests and approvals work
   in the browser as always, and jitd posts what it missed when it is back.
 
+### Microsoft Teams
+
+jitd can do the same in Microsoft Teams, independently of Slack: a flow may
+announce in either, both or neither. Set it up on **Integrations →
+Microsoft Teams**; no restart:
+
+1. **Register the app in Entra.** In the Microsoft Entra admin centre, go to
+   **App registrations → New registration**, name it *JIT access* and pick
+   **Accounts in this organizational directory only**. Copy the
+   **Application (client) ID** and the **Directory (tenant) ID**, then under
+   **Certificates & secrets → Client secrets → New client secret** copy the
+   secret's **Value** (not its ID; the value is shown once).
+2. **Create the bot and turn on socket mode.** In the Teams Developer
+   Portal, under **Tools → Bot management**, create a bot using that app ID,
+   open it, choose **Configure**, and under **Delivery method** pick
+   **Socket mode**.
+3. **Paste the three values** on the Microsoft Teams page, with the email
+   domains your people use, and click Connect.
+4. **Install the app in a team.** Download the app package from the page and
+   upload it in Teams (**Apps → Manage your apps → Upload a custom app**),
+   then add it to a team. Uploading custom apps has to be allowed in the
+   Teams admin centre.
+
+Then pick a channel on each approval flow's page, as with Slack.
+
+- **Nothing new to expose.** jitd connects out to Teams in socket mode, so
+  Teams never connects to jitd. Teams delivers from three regions and jitd
+  holds a socket to each, or it would miss conversations hosted in the
+  others; the page shows all three.
+- **Same rules.** Approve and Decline in Teams go through the same checks as
+  the browser, and the card updates itself as the request moves on.
+  Revoking stays in the browser. Decline asks for its reason in the card,
+  and only the person who pressed it sees that form. Message the bot (or
+  @mention it) with `status`, `request` or `help`; `/jit` in front is
+  optional.
+- **Identity** works as in Slack, by the work address instead of the Slack
+  email: the person must be a member of the connected tenant (not a guest),
+  their address must be in an allowed domain and be their Tailscale login,
+  and that login must own a device on the tailnet. Decisions show **via
+  Teams** on the request, with the Entra account that made them. **Decide in
+  the browser only** is per flow and per chat system, so a flow can be
+  browser-only in Teams and still decided in Slack.
+- **Direct messages only reach people the app can see.** Teams has no way to
+  look somebody up by address, so jitd reads the rosters of the teams the
+  app is installed in. An approver in none of them is listed with a warning
+  on the page and gets no direct message; the channel post and the browser
+  still reach them.
+- **The credentials** are kept in the database and never shown again. To
+  keep them out of it, set `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`,
+  `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_DOMAINS` in the env file instead and
+  restart jitd; they then win over the page. Disconnecting makes jitd forget
+  the secret, but Microsoft has no way to revoke one from here: delete it in
+  Entra as well.
+- **Socket mode is in public preview** and only available for newly created
+  bots. Microsoft recommends an HTTPS endpoint for production; jitd uses
+  socket mode because it is what keeps jitd off the public internet.
+- If Teams is down or jitd was, nothing is lost, exactly as with Slack.
+
 ### Backups and digging into the history
 
 Everything jitd remembers is in its SQLite database, `jit.db`: the flows,
@@ -1214,7 +1272,7 @@ expired attribute about a minute after the expiry time (we measured about
 | `-admins` | none | who may manage flows and see every request: logins, `group:`, `okta:`, `tag:` (not `autogroup:admin`; use a group such as `group:jit-admins`). With a group, adding an admin is a policy edit that takes effect within a minute, no restart |
 | `-state-dir` | `tsnet-state` | the node's identity; keep it |
 | `-data` | `jit.db` | the SQLite database with the approval flows and access requests. Name an older jitd's `.json` file and jitd uses the `.db` of the same name, filled from the `.json` the first time |
-| `-env-file` | `~/.config/jitd/env` (Linux), `~/Library/Application Support/jitd/env` (macOS) | optional: credentials you would rather keep out of the database. They win over what is saved on the Integrations pages. Tailscale API: `TS_OAUTH_CLIENT_ID` with `TS_OAUTH_CLIENT_SECRET` (OAuth client) or `TS_ID_TOKEN` (federated identity), or `TS_API_KEY`. Also `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` and `SLACK_ALLOWED_DOMAINS` (see Slack), the `OKTA_*` settings (see Okta groups) and `GOOGLE_SERVICE_ACCOUNT_JSON` (see Google groups) |
+| `-env-file` | `~/.config/jitd/env` (Linux), `~/Library/Application Support/jitd/env` (macOS) | optional: credentials you would rather keep out of the database. They win over what is saved on the Integrations pages. Tailscale API: `TS_OAUTH_CLIENT_ID` with `TS_OAUTH_CLIENT_SECRET` (OAuth client) or `TS_ID_TOKEN` (federated identity), or `TS_API_KEY`. Also `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` and `SLACK_ALLOWED_DOMAINS` (see Slack), `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`, `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_DOMAINS` (see Microsoft Teams), the `OKTA_*` settings (see Okta groups) and `GOOGLE_SERVICE_ACCOUNT_JSON` (see Google groups) |
 | `-hostname` | `jit` | the machine name on the tailnet |
 | `-tag` | `tag:jit` | the tag jitd runs as, used in the policy snippet |
 | `-https` | off | serve :443 with a Tailscale certificate and redirect :80; needs HTTPS turned on for the tailnet (admin console → DNS) |
@@ -1281,6 +1339,7 @@ In the API, an approval flow is called a *workflow*.
 | `GET/PUT/DELETE /v1/okta`, `POST /v1/okta/check` | the Okta connection (admins): its status, save credentials (tested first), remove them, try them again or test a group; keys and tokens are never returned |
 | `GET/PUT/DELETE /v1/google`, `POST /v1/google/check` | the Google connection (admins): its status, save the service account key and its limits (tested first), remove them, try them again or test a group; the key is never returned |
 | `GET /v1/slack`, `POST /v1/slack/connect` · `disconnect` · `test`, `PUT /v1/slack/domains`, `GET /v1/slack/channels` · `check` | the Slack connection (admins); tokens are never returned |
+| `GET /v1/teams`, `POST /v1/teams/connect` · `disconnect` · `test`, `PUT /v1/teams/domains`, `GET /v1/teams/channels` · `check` | the Microsoft Teams connection (admins); the client secret is never returned |
 
 Errors look like `{"error": {"code": "...", "message": "..."}}`. Some carry
 `request_id` and `url`, for example when you ask twice and jitd points you
@@ -1352,6 +1411,8 @@ jitd/internal/google     Cloud Identity Groups API client (service account key),
 jitd/internal/googlesetup the Google key and limits saved on Integrations → Google Groups
 jitd/internal/slack      Slack Web API and Socket Mode client, Block Kit helpers, slack.Fake
 jitd/internal/slackbot   the Slack integration: request messages, Approve/Decline, /jit, identity by email
+jitd/internal/teams      Agent Communication Service client, socket mode (SignalR), Adaptive Cards, teams.Fake
+jitd/internal/teamsbot   the Teams integration: request cards, Approve/Decline, commands, identity by work address
 jitd/preview             the UI preview
 ```
 
