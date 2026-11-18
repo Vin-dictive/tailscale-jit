@@ -90,6 +90,24 @@ type Notifier interface {
 	RequestChanged(r *AccessRequest, ev Event)
 }
 
+// Notifiers is a Notifier that tells several others, so jitd can run Slack
+// and Microsoft Teams side by side. Each gets its own copy of the request,
+// so one cannot see another's edits, and a panicking notifier is contained:
+// the rest are still told, and the service lock is not left held.
+type Notifiers []Notifier
+
+func (ns Notifiers) RequestChanged(r *AccessRequest, ev Event) {
+	for _, n := range ns {
+		if n == nil {
+			continue
+		}
+		func() {
+			defer func() { _ = recover() }()
+			n.RequestChanged(clone(r), ev)
+		}()
+	}
+}
+
 // emit tells the Notifier about a saved change to r.
 func (s *Service) emit(r *AccessRequest, ev Event) {
 	if s.Notify != nil && r != nil {
@@ -817,7 +835,7 @@ func (s *Service) submit(ctx context.Context, caller Identity, in NewRequest) (_
 	if startAt != nil {
 		note = fmt.Sprintf("for %s from %s: %s", dur.Human(), startAt.Format(timeFmt), reason)
 	}
-	r.Timeline = append(r.Timeline, Event{Type: "submitted", Actor: caller.Actor(), Note: note, Via: caller.Via, SlackUser: caller.SlackUser, At: now})
+	r.Timeline = append(r.Timeline, Event{Type: "submitted", Actor: caller.Actor(), Note: note, Via: caller.Via, SlackUser: caller.SlackUser, TeamsUser: caller.TeamsUser, At: now})
 	if err := s.Store.Update(func(d *Data) error { d.Requests[r.ID] = clone(r); return nil }); err != nil {
 		return nil, false, err
 	}
@@ -930,6 +948,30 @@ func (s *Service) RecordSlackMessages(id string, ms []SlackMessage) error {
 	})
 }
 
+// RecordTeamsMessages notes Teams cards posted about request id, so they
+// can be updated later. Bookkeeping: it does not count as a change.
+func (s *Service) RecordTeamsMessages(id string, ms []TeamsMessage) error {
+	if len(ms) == 0 {
+		return nil
+	}
+	s.mu.Lock() // an action in flight must not save over it
+	defer s.mu.Unlock()
+	return s.Store.UpdateQuiet(func(d *Data) (bool, error) {
+		r, ok := d.Requests[id]
+		if !ok {
+			return false, notFound("access request %q not found", id)
+		}
+		for _, m := range ms {
+			if !slices.ContainsFunc(r.Teams, func(x TeamsMessage) bool {
+				return x.Conversation == m.Conversation && x.ActivityID == m.ActivityID
+			}) {
+				r.Teams = append(r.Teams, m)
+			}
+		}
+		return false, nil
+	})
+}
+
 // Request returns a copy of request id, without a visibility check (for
 // internal callers such as notifiers), or nil.
 func (s *Service) Request(id string) *AccessRequest {
@@ -1003,12 +1045,23 @@ func (s *Service) ApproverLogins(ctx context.Context, w *Workflow) ([]string, er
 	return out, groupsErr
 }
 
-// browserOnly refuses a decision made through Slack on a flow that is
-// decided in the browser only. The Slack messages of such a flow carry no
-// buttons; this also covers forms opened before the setting changed.
+// browserOnly refuses a decision made through chat on a flow that is decided
+// in the browser only. The messages of such a flow carry no buttons; this
+// also covers forms opened before the setting changed. The setting is per
+// chat system: a flow may be browser-only in Teams and not in Slack.
 func browserOnly(actor Identity, w *Workflow) error {
-	if actor.Via == ViaSlack && w != nil && w.Slack != nil && w.Slack.BrowserOnly {
-		return forbidden("approval flow %q is decided in the browser only", w.Name)
+	if w == nil {
+		return nil
+	}
+	switch actor.Via {
+	case ViaSlack:
+		if w.Slack != nil && w.Slack.BrowserOnly {
+			return forbidden("approval flow %q is decided in the browser only", w.Name)
+		}
+	case ViaTeams:
+		if w.Teams != nil && w.Teams.BrowserOnly {
+			return forbidden("approval flow %q is decided in the browser only", w.Name)
+		}
 	}
 	return nil
 }
@@ -1209,14 +1262,14 @@ func (s *Service) approve(ctx context.Context, actor Identity, id, note string, 
 	// then it grants.
 	voted := slices.ContainsFunc(r.Approvals, func(a Approval) bool { return sameApprover(a, actor) })
 	if !voted {
-		r.Approvals = append(r.Approvals, Approval{Actor: actor.Actor(), Login: actor.Login, Tags: actor.Tags, DeviceID: actor.DeviceID, Note: note, Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+		r.Approvals = append(r.Approvals, Approval{Actor: actor.Actor(), Login: actor.Login, Tags: actor.Tags, DeviceID: actor.DeviceID, Note: note, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 	}
 	valid := s.validVotes(ctx, r, w)
 	if valid < r.ApprovalsRequired {
 		if voted {
 			return r, false, nil
 		}
-		r.Timeline = append(r.Timeline, Event{Type: "approval", Actor: actor.Actor(), At: now, Via: actor.Via, SlackUser: actor.SlackUser,
+		r.Timeline = append(r.Timeline, Event{Type: "approval", Actor: actor.Actor(), At: now, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser,
 			Note: joinNote(note, fmt.Sprintf("%d of %d approvals", valid, r.ApprovalsRequired))})
 		if err := s.save(r); err != nil {
 			return nil, false, err
@@ -1224,7 +1277,7 @@ func (s *Service) approve(ctx context.Context, actor Identity, id, note string, 
 		s.emit(r, r.Timeline[len(r.Timeline)-1])
 		return r, false, nil
 	}
-	return s.grant(ctx, r, w, Event{Actor: actor.Actor(), Via: actor.Via, SlackUser: actor.SlackUser}, note, !voted, og)
+	return s.grant(ctx, r, w, Event{Actor: actor.Actor(), Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser}, note, !voted, og)
 }
 
 // grant approves r, as decided by "by" (its Actor, Via and SlackUser). For a
@@ -1258,7 +1311,7 @@ func (s *Service) grant(ctx context.Context, r *AccessRequest, w *Workflow, by E
 		// Nothing is granted yet, so nothing is added in Okta either: that
 		// happens at the start, the same way an approval does it.
 		r.Status, r.ApprovedAt, r.ExpiresAt, r.LastError = StatusScheduled, &now, &exp, ""
-		r.Timeline = append(r.Timeline, Event{Type: "approved", Actor: by.Actor, At: now, Via: by.Via, SlackUser: by.SlackUser,
+		r.Timeline = append(r.Timeline, Event{Type: "approved", Actor: by.Actor, At: now, Via: by.Via, SlackUser: by.SlackUser, TeamsUser: by.TeamsUser,
 			Note: joinNote(grantNote, fmt.Sprintf("scheduled: starts %s, for %s, until %s", start.Format(timeFmt), r.Duration.Human(), exp.Format(timeFmt)))})
 		if err := s.save(r); err != nil {
 			return nil, false, err
@@ -1280,7 +1333,7 @@ func (s *Service) grant(ctx context.Context, r *AccessRequest, w *Workflow, by E
 			r.Approvals = r.Approvals[:len(r.Approvals)-1]
 		}
 		r.LastError = err.Error()
-		r.Timeline = append(r.Timeline, Event{Type: "approve_failed", Actor: by.Actor, Note: r.LastError, Via: by.Via, SlackUser: by.SlackUser, At: now})
+		r.Timeline = append(r.Timeline, Event{Type: "approve_failed", Actor: by.Actor, Note: r.LastError, Via: by.Via, SlackUser: by.SlackUser, TeamsUser: by.TeamsUser, At: now})
 		if serr := s.save(r); serr != nil {
 			return nil, false, serr
 		}
@@ -1289,7 +1342,7 @@ func (s *Service) grant(ctx context.Context, r *AccessRequest, w *Workflow, by E
 		return r, false, apiFailed("could not grant access: %s", r.LastError)
 	}
 	r.LastError = ""
-	r.Timeline = append(r.Timeline, Event{Type: "approved", Actor: by.Actor, At: now, Via: by.Via, SlackUser: by.SlackUser,
+	r.Timeline = append(r.Timeline, Event{Type: "approved", Actor: by.Actor, At: now, Via: by.Via, SlackUser: by.SlackUser, TeamsUser: by.TeamsUser,
 		Note: joinNote(grantNote, fmt.Sprintf("for %s, until %s", Duration(exp.Sub(now)).Human(), exp.Format(timeFmt)))})
 	if err := s.saveGranted(actx, r, StatusPending, og); err != nil {
 		return nil, false, err
@@ -1451,7 +1504,7 @@ func (s *Service) Decline(ctx context.Context, actor Identity, id, note string) 
 	}
 	now := s.now()
 	r.Status, r.UpdatedAt = StatusDeclined, now
-	r.Timeline = append(r.Timeline, Event{Type: "declined", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+	r.Timeline = append(r.Timeline, Event{Type: "declined", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 	if err := s.save(r); err != nil {
 		return nil, err
 	}
@@ -1507,7 +1560,7 @@ func (s *Service) revoke(ctx context.Context, actor Identity, id, note string) (
 	if r.Status == StatusScheduled {
 		// Nothing was granted yet: calling it off is only a record.
 		r.Status, r.LastError = StatusRevoked, ""
-		r.Timeline = append(r.Timeline, Event{Type: "revoked", Actor: actor.Actor(), Note: joinNote(note, "before it started"), Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+		r.Timeline = append(r.Timeline, Event{Type: "revoked", Actor: actor.Actor(), Note: joinNote(note, "before it started"), Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 		if err := s.save(r); err != nil {
 			return nil, err
 		}
@@ -1525,7 +1578,7 @@ func (s *Service) revoke(ctx context.Context, actor Identity, id, note string) (
 	if err := attrErr; err != nil {
 		r.Status = StatusApproved
 		r.LastError = err.Error()
-		r.Timeline = append(r.Timeline, Event{Type: "revoke_failed", Actor: actor.Actor(), Note: r.LastError, Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+		r.Timeline = append(r.Timeline, Event{Type: "revoke_failed", Actor: actor.Actor(), Note: r.LastError, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 		if serr := s.save(r); serr != nil {
 			return nil, serr
 		}
@@ -1533,7 +1586,7 @@ func (s *Service) revoke(ctx context.Context, actor Identity, id, note string) (
 		return r, apiFailed("could not remove access: %s", r.LastError)
 	}
 	r.LastError = ""
-	r.Timeline = append(r.Timeline, Event{Type: "revoked", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+	r.Timeline = append(r.Timeline, Event{Type: "revoked", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 	s.verify(actx, r)
 	if err := s.save(r); err != nil {
 		return nil, err
@@ -1564,7 +1617,7 @@ func (s *Service) Cancel(ctx context.Context, actor Identity, id, note string) (
 	}
 	now := s.now()
 	r.Status, r.UpdatedAt = StatusCancelled, now
-	r.Timeline = append(r.Timeline, Event{Type: "cancelled", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, At: now})
+	r.Timeline = append(r.Timeline, Event{Type: "cancelled", Actor: actor.Actor(), Note: note, Via: actor.Via, SlackUser: actor.SlackUser, TeamsUser: actor.TeamsUser, At: now})
 	if err := s.save(r); err != nil {
 		return nil, err
 	}

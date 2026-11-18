@@ -20,6 +20,7 @@ import (
 	"github.com/atoonk/tailscale-jit/jitd/internal/oktasetup"
 	"github.com/atoonk/tailscale-jit/jitd/internal/setup"
 	"github.com/atoonk/tailscale-jit/jitd/internal/slackbot"
+	"github.com/atoonk/tailscale-jit/jitd/internal/teamsbot"
 	"github.com/atoonk/tailscale-jit/jitd/internal/tsapi"
 )
 
@@ -30,6 +31,9 @@ type Server struct {
 	TS       tsapi.Client   // for the attribute passthrough endpoint
 	Setup    *setup.Checker // the Tailscale credential and its check, behind /admin/integrations/tailscale; nil hides it
 	Slack    *slackbot.Bot  // the Slack integration behind /admin/integrations/slack; nil hides it
+	// Teams is the Microsoft Teams integration behind
+	// /admin/integrations/teams; nil hides it.
+	Teams *teamsbot.Bot
 	// Okta is the Okta credentials behind /admin/integrations/okta; nil
 	// hides the page.
 	Okta *oktasetup.Manager
@@ -379,6 +383,64 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"sent": true})
 	}))
 
+	mux.HandleFunc("GET /v1/teams", s.withTeams(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
+		writeJSON(w, http.StatusOK, s.Teams.Status())
+	}))
+	mux.HandleFunc("POST /v1/teams/connect", s.withTeams(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		var in teamsbot.ConnectInput
+		if !decode(w, r, &in) {
+			return
+		}
+		out, err := s.Teams.Connect(r.Context(), id, in)
+		s.reply(w, http.StatusOK, out, err)
+	}))
+	mux.HandleFunc("POST /v1/teams/disconnect", s.withTeams(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		if err := s.Teams.Disconnect(r.Context(), id); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.Teams.Status())
+	}))
+	mux.HandleFunc("PUT /v1/teams/domains", s.withTeams(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		var in struct {
+			AllowedDomains []string `json:"allowed_domains"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		out, err := s.Teams.SetDomains(id, in.AllowedDomains)
+		s.reply(w, http.StatusOK, out, err)
+	}))
+	mux.HandleFunc("GET /v1/teams/channels", s.withTeams(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
+		cs, err := s.Teams.Channels(r.Context())
+		if err != nil {
+			writeErr(w, &jit.Error{Code: "teams_error", Status: http.StatusBadGateway, Message: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"channels": jit.OrEmpty(cs)})
+	}))
+	mux.HandleFunc("GET /v1/teams/check", s.withTeams(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
+		fcs, err := s.Teams.Check(r.Context())
+		if err != nil {
+			writeErr(w, &jit.Error{Code: "teams_error", Status: http.StatusBadGateway, Message: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"flows": jit.OrEmpty(fcs)})
+	}))
+	mux.HandleFunc("POST /v1/teams/test", s.withTeams(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		var in struct {
+			Channel string `json:"channel"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if err := s.Teams.TestMessage(r.Context(), id, in.Channel); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sent": true})
+	}))
+
 	mux.HandleFunc("GET /v1/devices/{id}/attributes", s.withAdmin(func(w http.ResponseWriter, r *http.Request, _ jit.Identity) {
 		a, err := s.TS.GetAttributes(r.Context(), r.PathValue("id"))
 		if err != nil {
@@ -521,6 +583,18 @@ func (s *Server) withSlack(h func(http.ResponseWriter, *http.Request, jit.Identi
 	return s.withAdmin(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
 		if s.Slack == nil {
 			writeErr(w, &jit.Error{Code: "not_found", Status: http.StatusNotFound, Message: "no Slack integration in this build"})
+			return
+		}
+		h(w, r, id)
+	})
+}
+
+// withTeams is withAdmin for the Microsoft Teams endpoints, which are not
+// there in a build without the integration.
+func (s *Server) withTeams(h func(http.ResponseWriter, *http.Request, jit.Identity)) http.HandlerFunc {
+	return s.withAdmin(func(w http.ResponseWriter, r *http.Request, id jit.Identity) {
+		if s.Teams == nil {
+			writeErr(w, &jit.Error{Code: "not_found", Status: http.StatusNotFound, Message: "no Teams integration in this build"})
 			return
 		}
 		h(w, r, id)

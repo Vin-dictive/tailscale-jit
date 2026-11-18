@@ -28,6 +28,7 @@ const openAPISpec = `{
     {"name": "okta", "description": "The Okta credentials (admins). The private key and the API token are never returned"},
     {"name": "google", "description": "The Google service account and its limits (admins). The key is never returned"},
     {"name": "slack", "description": "The Slack integration (admins). jitd connects out to Slack with Socket Mode; tokens are never returned"},
+    {"name": "teams", "description": "The Microsoft Teams integration (admins). jitd connects out to Teams in socket mode; the client secret is never returned"},
     {"name": "mcp", "description": "The MCP server, for agents. Not a REST endpoint: JSON-RPC 2.0 over Streamable HTTP, see https://modelcontextprotocol.io"}
   ],
   "paths": {
@@ -172,6 +173,29 @@ const openAPISpec = `{
     "/v1/slack/test": {"post": {"tags": ["slack"], "summary": "Post a test message to a channel", "operationId": "slackTest",
       "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["channel"], "properties": {"channel": {"type": "string", "description": "Channel ID"}}}}}},
       "responses": {"200": {"description": "Sent"}, "400": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams": {"get": {"tags": ["teams"], "summary": "The Microsoft Teams connection, without the secret", "operationId": "teamsStatus",
+      "responses": {"200": {"$ref": "#/components/responses/Teams"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/connect": {"post": {"tags": ["teams"], "summary": "Check the app registration with Microsoft, save it and connect", "operationId": "teamsConnect",
+      "description": "Replaces an earlier connection made here. Refused (409) when the credentials come from jitd's env file.",
+      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["app_id", "app_password", "tenant_id", "allowed_domains"], "properties": {
+        "app_id": {"type": "string", "description": "The Entra application (client) ID, a GUID"}, "app_password": {"type": "string", "description": "A client secret's value"},
+        "tenant_id": {"type": "string", "description": "The directory (tenant) ID, a GUID"},
+        "allowed_domains": {"type": "array", "items": {"type": "string"}, "example": ["example.com"]}}}}}},
+      "responses": {"200": {"$ref": "#/components/responses/Teams"}, "400": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/disconnect": {"post": {"tags": ["teams"], "summary": "Forget the credentials and disconnect", "operationId": "teamsDisconnect",
+      "description": "Microsoft has no way to revoke a client secret from here: delete it in Entra as well.",
+      "responses": {"200": {"$ref": "#/components/responses/Teams"}, "409": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/domains": {"put": {"tags": ["teams"], "summary": "Set the email domains Teams users are matched in", "operationId": "teamsDomains",
+      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"allowed_domains": {"type": "array", "items": {"type": "string"}}}}}}},
+      "responses": {"200": {"$ref": "#/components/responses/Teams"}, "400": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/channels": {"get": {"tags": ["teams"], "summary": "Channels of the teams the app is installed in", "operationId": "teamsChannels",
+      "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"channels": {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string", "example": "19:0123abc@thread.tacv2"}, "name": {"type": "string"}, "team_id": {"type": "string"}, "team_name": {"type": "string"}}}}}}}}}, "502": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/check": {"get": {"tags": ["teams"], "summary": "Per flow: can the app post to its channel, and which approvers Teams matches to their login", "operationId": "teamsCheck",
+      "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"flows": {"type": "array", "items": {"$ref": "#/components/schemas/TeamsFlowCheck"}}}}}}}, "502": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/teams/test": {"post": {"tags": ["teams"], "summary": "Post a test card to a channel", "operationId": "teamsTest",
+      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["channel"], "properties": {"channel": {"type": "string", "description": "Conversation ID"}}}}}},
+      "responses": {"200": {"description": "Sent"}, "400": {"$ref": "#/components/responses/Error"}}}},
     "/v1/changes": {"get": {"tags": ["me"], "summary": "A counter that increases whenever anything changes (pages poll it)", "operationId": "changes",
       "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"changes": {"type": "integer"}}}}}}}}}
   },
@@ -187,6 +211,7 @@ const openAPISpec = `{
       "Okta": {"description": "The Okta connection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OktaStatus"}}}},
       "Google": {"description": "The Google connection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GoogleStatus"}}}},
       "Slack": {"description": "The Slack connection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SlackStatus"}}}},
+      "Teams": {"description": "The Microsoft Teams connection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TeamsStatus"}}}},
       "Error": {"description": "Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorBody"}}}},
       "APIFailed": {"description": "Granting or ending the access failed: the Tailscale API, or Okta or Google for a flow with groups (the code is tailscale_api_error either way). The action was recorded (approve_failed / revoke_failed) and the request is returned with the error; retry later", "content": {"application/json": {"schema": {"type": "object", "properties": {"error": {"$ref": "#/components/schemas/ErrorBody/properties/error"}, "request": {"$ref": "#/components/schemas/AccessRequest"}}}}}}
     },
@@ -245,6 +270,28 @@ const openAPISpec = `{
         "channel": {"type": "string", "description": "Channel ID; empty for none", "example": "C0123456789"}, "channel_name": {"type": "string", "example": "sre-oncall"},
         "dm_approvers": {"type": "boolean", "description": "Also send each approver a direct message"},
         "browser_only": {"type": "boolean", "description": "No Approve/Decline buttons in Slack; decide in the browser"}}},
+      "TeamsStatus": {"type": "object", "properties": {
+        "source": {"type": "string", "enum": ["", "ui", "env"], "description": "Where the credentials come from: saved on the Microsoft Teams page, or jitd's env file; empty when not set up"},
+        "env_file": {"type": "string"}, "state": {"type": "string", "enum": ["off", "connecting", "connected", "error"]}, "since": {"type": "string", "format": "date-time"}, "last_error": {"type": "string"},
+        "geos": {"type": "array", "description": "Teams delivers from three regions; jitd holds a socket to each", "items": {"type": "object", "properties": {
+          "geo": {"type": "string", "enum": ["amer", "emea", "apac"]}, "state": {"type": "string", "enum": ["off", "connecting", "connected", "error"]}, "last_error": {"type": "string"}}}},
+        "app_id": {"type": "string"}, "tenant_id": {"type": "string"}, "password_hint": {"type": "string", "example": "…a1b2"},
+        "allowed_domains": {"type": "array", "items": {"type": "string"}},
+        "installed": {"type": "array", "description": "Teams the app has been added to; without one there is nowhere to post", "items": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}},
+        "connected_by": {"type": "string"}, "connected_at": {"type": "string", "format": "date-time"},
+        "manifest_path": {"type": "string", "description": "Where the app package is downloaded from"}}},
+      "TeamsFlowCheck": {"type": "object", "properties": {
+        "workflow_id": {"type": "string"}, "workflow_name": {"type": "string"}, "channel": {"type": "string"}, "channel_name": {"type": "string"},
+        "channel_issue": {"type": "string", "description": "Why the app cannot post there, if it cannot"}, "dm_approvers": {"type": "boolean"}, "browser_only": {"type": "boolean"},
+        "approvers": {"type": "array", "items": {"type": "object", "properties": {"login": {"type": "string"}, "teams_user": {"type": "string"}, "problem": {"type": "string"}}}},
+        "approver_issue": {"type": "string", "description": "Why the approver list may be incomplete (group members could not be read)"},
+        "members": {"type": "boolean", "description": "autogroup:member approves: anyone on the tailnet, from Teams too if their work address is their Tailscale login"},
+        "other_approvers": {"type": "array", "items": {"type": "string"}, "description": "tag: approvers; devices decide in the browser or through the API"}}},
+      "WorkflowTeams": {"type": "object", "description": "Where requests through the flow are announced in Microsoft Teams", "properties": {
+        "channel": {"type": "string", "description": "Conversation ID; empty for none", "example": "19:0123abc@thread.tacv2"}, "channel_name": {"type": "string", "example": "sre-oncall"},
+        "team_id": {"type": "string", "description": "The team the channel belongs to; required with a channel"},
+        "dm_approvers": {"type": "boolean", "description": "Also send each approver a direct message"},
+        "browser_only": {"type": "boolean", "description": "No Approve/Decline buttons in Teams; decide in the browser"}}},
       "Status": {"type": "string", "enum": ["pending", "scheduled", "approved", "declined", "expired", "revoked", "cancelled"], "description": "scheduled: approved, for a window that has not started yet (nothing is granted until it does)"},
       "Principal": {"type": "string", "description": "A login (alice@example.com), group:<name> from the policy file, okta:<group name or ID> when Okta is connected, tag:<name>, or autogroup:member", "example": "group:sre"},
       "Duration": {"type": "string", "description": "Go duration (15m, 1h30m), optionally with leading whole days (3d, 1d12h); no signs. Responses use Go's form, e.g. 72h0m0s. A number is taken as nanoseconds", "example": "1h0m0s"},
@@ -252,7 +299,7 @@ const openAPISpec = `{
         "login": {"type": "string", "example": "alice@example.com"}, "display_name": {"type": "string"},
         "device_id": {"type": "string", "example": "nABC123CNTRL"}, "device_name": {"type": "string", "example": "alice-laptop"},
         "tags": {"type": "array", "items": {"type": "string"}, "description": "Set for tagged devices; such callers have no login"},
-        "via": {"type": "string", "enum": ["slack"], "description": "Set when the caller was identified by their Slack account's email rather than by Tailscale"}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}}},
+        "via": {"type": "string", "enum": ["slack", "teams"], "description": "Set when the caller was identified by their Slack account's email or their Teams work address rather than by Tailscale"}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}, "teams_user": {"type": "string", "description": "With via teams: the Teams account, as <tenant ID>/<Entra object ID>"}}},
       "Me": {"allOf": [{"$ref": "#/components/schemas/Identity"}, {"type": "object", "properties": {"admin": {"type": "boolean"}}}]},
       "Requestable": {"type": "object", "properties": {
         "workflow_id": {"type": "string"}, "workflow_name": {"type": "string"}, "description": {"type": "string"},
@@ -273,14 +320,14 @@ const openAPISpec = `{
         "duration": {"$ref": "#/components/schemas/Duration"},
         "reason": {"type": "string", "description": "What you need to do and why; shown to the approver"},
         "start_at": {"type": "string", "format": "date-time", "description": "Schedule the access for later (RFC 3339, at most 30 days ahead). Approvers can decide any time before; access starts then, for duration. Omit (or give a time within a minute of now) to start on approval"}}},
-      "Approval": {"type": "object", "properties": {"actor": {"type": "string"}, "login": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}, "description": "The voter's tags, for a tagged device"}, "device_id": {"type": "string", "description": "The approver's device; tells tagged approvers apart"}, "note": {"type": "string"}, "via": {"type": "string", "enum": ["slack"]}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}, "at": {"type": "string", "format": "date-time"}}},
+      "Approval": {"type": "object", "properties": {"actor": {"type": "string"}, "login": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}, "description": "The voter's tags, for a tagged device"}, "device_id": {"type": "string", "description": "The approver's device; tells tagged approvers apart"}, "note": {"type": "string"}, "via": {"type": "string", "enum": ["slack", "teams"]}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}, "teams_user": {"type": "string", "description": "With via teams: the Teams account, as <tenant ID>/<Entra object ID>"}, "at": {"type": "string", "format": "date-time"}}},
       "Enforcement": {"type": "object", "description": "What was verified on the device, separate from what was requested", "properties": {
         "confirmed_at": {"type": "string", "format": "date-time", "description": "The attribute was read back present after approval"},
         "removed_at": {"type": "string", "format": "date-time", "description": "The attribute was read back absent after expiry or revoke"},
         "checked_at": {"type": "string", "format": "date-time"}, "error": {"type": "string"}}},
       "Event": {"type": "object", "properties": {
         "type": {"type": "string", "enum": ["submitted", "approval", "approved", "approve_failed", "started", "start_failed", "declined", "cancelled", "revoked", "revoke_failed", "expired"]},
-        "actor": {"type": "string"}, "note": {"type": "string"}, "via": {"type": "string", "enum": ["slack"], "description": "The actor acted from Slack"}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}, "at": {"type": "string", "format": "date-time"}}},
+        "actor": {"type": "string"}, "note": {"type": "string"}, "via": {"type": "string", "enum": ["slack", "teams"], "description": "The actor acted from Slack or Microsoft Teams"}, "slack_user": {"type": "string", "description": "With via slack: the Slack account, as <team ID>/<user ID>"}, "teams_user": {"type": "string", "description": "With via teams: the Teams account, as <tenant ID>/<Entra object ID>"}, "at": {"type": "string", "format": "date-time"}}},
       "AccessRequest": {"type": "object", "properties": {
         "id": {"type": "string", "example": "req_ec77cc3939cd0d5d"}, "url": {"type": "string", "description": "The approval page; show this to the user"},
         "workflow_id": {"type": "string"}, "workflow_name": {"type": "string"},
@@ -304,6 +351,7 @@ const openAPISpec = `{
         "attributes": {"type": "array", "items": {"type": "string"}, "description": "The attribute, once approval set it; empty if access was never granted", "example": ["custom:jit_db_ro"]},
         "policy": {"$ref": "#/components/schemas/PolicyUse"},
         "slack": {"type": "array", "description": "Slack messages posted about the request", "items": {"type": "object", "properties": {"channel": {"type": "string"}, "ts": {"type": "string"}, "kind": {"type": "string", "enum": ["channel", "dm", "okta_alert"]}, "user": {"type": "string"}}}},
+        "teams": {"type": "array", "description": "Microsoft Teams cards posted about the request", "items": {"type": "object", "properties": {"conversation": {"type": "string"}, "activity_id": {"type": "string"}, "service_url": {"type": "string", "description": "The endpoint the card is updated on; it varies by tenant"}, "kind": {"type": "string", "enum": ["channel", "dm", "okta_alert"]}, "user": {"type": "string"}}}},
         "last_error": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
       "Resource": {"type": "object", "required": ["name"], "properties": {
         "name": {"type": "string", "description": "One name without spaces. For Tailscale access, as it appears in a policy grant: svc:, tag:, a host, a CIDR", "example": "svc:mysql-prod"},
@@ -339,6 +387,7 @@ const openAPISpec = `{
         "default_duration": {"allOf": [{"$ref": "#/components/schemas/Duration"}], "description": "At most max_duration"},
         "approval_timeout": {"allOf": [{"$ref": "#/components/schemas/Duration"}], "description": "1 minute to 365 days; pending requests expire after this"}, "disabled": {"type": "boolean"},
         "slack": {"$ref": "#/components/schemas/WorkflowSlack"},
+        "teams": {"$ref": "#/components/schemas/WorkflowTeams"},
         "created_at": {"type": "string", "format": "date-time", "readOnly": true}, "updated_at": {"type": "string", "format": "date-time", "readOnly": true}}},
       "ErrorBody": {"type": "object", "properties": {"error": {"type": "object", "properties": {
         "code": {"type": "string", "enum": ["bad_request", "forbidden", "not_found", "conflict", "identity_unavailable", "tailscale_api_error", "slack_error", "unknown_host", "policy_no_effect", "too_large", "internal"], "description": "unknown_host (421): the request named a host that is not jitd. policy_no_effect and too_large come from /mcp only"},

@@ -45,6 +45,7 @@ func TestFlowJSONCoversWorkflow(t *testing.T) {
 		UpdatedBy: "root@example.com", MaxDuration: jit.Duration(4 * time.Hour), ApprovalTimeout: jit.Duration(2 * time.Hour),
 		ApprovalsRequired: 2, DefaultDuration: jit.Duration(time.Hour), Disabled: true,
 		Slack:     &jit.WorkflowSlack{Channel: "C1", ChannelName: "access", DMApprovers: true, BrowserOnly: true},
+		Teams:     &jit.WorkflowTeams{Channel: "19:access@thread.tacv2", ChannelName: "access", TeamID: "19:eng@thread.tacv2", DMApprovers: true, BrowserOnly: true},
 		CreatedAt: at, UpdatedAt: at.Add(time.Minute),
 	}
 	// Every field is set, so that one the conversion forgets shows below.

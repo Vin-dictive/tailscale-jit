@@ -35,6 +35,7 @@ type flowJSON struct {
 	DefaultDuration   jit.Duration       `json:"default_duration,omitempty"`
 	Disabled          bool               `json:"disabled,omitempty"`
 	Slack             *jit.WorkflowSlack `json:"slack,omitempty"`
+	Teams             *jit.WorkflowTeams `json:"teams,omitempty"`
 	CreatedAt         time.Time          `json:"created_at"`
 	UpdatedAt         time.Time          `json:"updated_at"`
 
@@ -82,7 +83,7 @@ func flowOut(w *jit.Workflow) *flowJSON {
 		Requesters: w.Requesters, Approvers: w.Approvers, AllowSelfApproval: w.AllowSelfApproval,
 		AutoApprove: w.AutoApprove, AutoApproveBy: w.AutoApproveBy, AutoApproveAt: w.AutoApproveAt, UpdatedBy: w.UpdatedBy,
 		MaxDuration: w.MaxDuration, ApprovalTimeout: w.ApprovalTimeout, ApprovalsRequired: w.ApprovalsRequired,
-		DefaultDuration: w.DefaultDuration, Disabled: w.Disabled, Slack: w.Slack,
+		DefaultDuration: w.DefaultDuration, Disabled: w.Disabled, Slack: w.Slack, Teams: w.Teams,
 		CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt,
 	}
 }
@@ -105,7 +106,7 @@ func (f *flowJSON) workflow() (jit.Workflow, error) {
 		Requesters: f.Requesters, Approvers: f.Approvers, AllowSelfApproval: f.AllowSelfApproval,
 		AutoApprove: f.AutoApprove, AutoApproveBy: f.AutoApproveBy, AutoApproveAt: f.AutoApproveAt, UpdatedBy: f.UpdatedBy,
 		MaxDuration: f.MaxDuration, ApprovalTimeout: f.ApprovalTimeout, ApprovalsRequired: f.ApprovalsRequired,
-		DefaultDuration: f.DefaultDuration, Disabled: f.Disabled, Slack: f.Slack,
+		DefaultDuration: f.DefaultDuration, Disabled: f.Disabled, Slack: f.Slack, Teams: f.Teams,
 		CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
 	}
 	older := f.Attribute != nil || f.OktaGroups != nil || f.GoogleGroups != nil

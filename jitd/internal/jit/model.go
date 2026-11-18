@@ -197,7 +197,10 @@ type Workflow struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Slack is where requests through this flow are announced, if Slack is
 	// connected. Nil means nowhere.
-	Slack     *WorkflowSlack `json:"slack,omitempty"`
+	Slack *WorkflowSlack `json:"slack,omitempty"`
+	// Teams is the same for Microsoft Teams, independently of Slack: a flow
+	// may announce in either, both, or neither.
+	Teams     *WorkflowTeams `json:"teams,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
@@ -220,6 +223,32 @@ type SlackMessage struct {
 	TS      string `json:"ts"`             // the message's timestamp, Slack's message ID
 	Kind    string `json:"kind,omitempty"` // "channel", "dm" or "okta_alert"
 	User    string `json:"user,omitempty"` // the Slack user a DM went to
+}
+
+// WorkflowTeams is a flow's Microsoft Teams settings. It mirrors
+// WorkflowSlack, with one addition: a channel belongs to a team, and
+// reading a team's roster needs to know which.
+type WorkflowTeams struct {
+	Channel     string `json:"channel,omitempty"`      // conversation ID (19:…@thread.tacv2) new requests are posted to
+	ChannelName string `json:"channel_name,omitempty"` // its name when it was picked, for display
+	TeamID      string `json:"team_id,omitempty"`      // the team the channel belongs to
+	DMApprovers bool   `json:"dm_approvers,omitempty"` // also send each approver a direct message
+	// BrowserOnly leaves the Approve and Decline buttons off the Teams
+	// cards: decisions for this flow are made in the browser, where the
+	// approver is identified by Tailscale, not by their Teams account.
+	BrowserOnly bool `json:"browser_only,omitempty"`
+}
+
+// TeamsMessage is one card jitd posted about a request, so it can be
+// updated as the request moves on. Unlike Slack, the endpoint to update it
+// on varies by tenant and arrives on the activity, so it is kept here
+// rather than assumed.
+type TeamsMessage struct {
+	Conversation string `json:"conversation"`   // channel or 1:1 conversation ID
+	ActivityID   string `json:"activity_id"`    // the posted activity, Teams's message ID
+	ServiceURL   string `json:"service_url"`    // the ACS endpoint to update it on
+	Kind         string `json:"kind,omitempty"` // "channel", "dm" or "okta_alert"
+	User         string `json:"user,omitempty"` // the Teams user a DM went to
 }
 
 // Resource is one thing an attribute gives access to, as a policy grant
@@ -393,17 +422,24 @@ type Identity struct {
 	DeviceName  string   `json:"device_name,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	// Via says how the caller was identified when it was not Tailscale:
-	// "slack" for a Slack user matched to this login by email. Recorded with
-	// every decision they make.
+	// "slack" for a Slack user matched to this login by email, "teams" for a
+	// Teams user matched by their work address. Recorded with every decision
+	// they make.
 	Via string `json:"via,omitempty"`
 	// SlackUser is the Slack account behind a Via "slack" identity, as
 	// "<team ID>/<user ID>", so a decision can be traced to the account that
 	// made it even if that account's email changes later.
 	SlackUser string `json:"slack_user,omitempty"`
+	// TeamsUser is the same for a Via "teams" identity, as
+	// "<tenant ID>/<Entra object ID>".
+	TeamsUser string `json:"teams_user,omitempty"`
 }
 
 // ViaSlack marks identities that came from a Slack account, not WhoIs.
 const ViaSlack = "slack"
+
+// ViaTeams marks identities that came from a Microsoft Teams account.
+const ViaTeams = "teams"
 
 // Tagged reports whether the caller is a tagged device (no user identity).
 func (id Identity) Tagged() bool { return len(id.Tags) > 0 }
@@ -423,8 +459,9 @@ type Approval struct {
 	Tags      []string  `json:"tags,omitempty"`      // the voter's tags, for tagged devices
 	DeviceID  string    `json:"device_id,omitempty"` // tells tagged approvers apart (their name can change)
 	Note      string    `json:"note,omitempty"`
-	Via       string    `json:"via,omitempty"`        // "slack" when the vote came through Slack
+	Via       string    `json:"via,omitempty"`        // "slack" or "teams" when the vote came through chat
 	SlackUser string    `json:"slack_user,omitempty"` // with Via "slack": "<team>/<user>"
+	TeamsUser string    `json:"teams_user,omitempty"` // with Via "teams": "<tenant>/<object ID>"
 	At        time.Time `json:"at"`
 }
 
@@ -452,8 +489,9 @@ type Event struct {
 	Type      string    `json:"type"` // submitted approval approved approve_failed declined cancelled revoked revoke_failed expired
 	Actor     string    `json:"actor"`
 	Note      string    `json:"note,omitempty"`
-	Via       string    `json:"via,omitempty"`        // "slack" when the actor acted through Slack
+	Via       string    `json:"via,omitempty"`        // "slack" or "teams" when the actor acted through chat
 	SlackUser string    `json:"slack_user,omitempty"` // with Via "slack": "<team>/<user>"
+	TeamsUser string    `json:"teams_user,omitempty"` // with Via "teams": "<tenant>/<object ID>"
 	At        time.Time `json:"at"`
 }
 
@@ -509,7 +547,9 @@ type AccessRequest struct {
 	Google       *GroupGrant  `json:"google,omitempty"`
 	GoogleAdding *GroupIntent `json:"google_adding,omitempty"`
 	// Slack lists the Slack messages posted about this request.
-	Slack     []SlackMessage `json:"slack,omitempty"`
+	Slack []SlackMessage `json:"slack,omitempty"`
+	// Teams lists the Microsoft Teams cards posted about this request.
+	Teams     []TeamsMessage `json:"teams,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	// Policy is what the tailnet policy grants for Attribute; set by the
@@ -664,10 +704,25 @@ func (w *Workflow) Normalize() {
 			w.Slack = nil
 		}
 	}
+	if w.Teams != nil {
+		w.Teams.Channel = strings.TrimSpace(w.Teams.Channel)
+		w.Teams.TeamID = strings.TrimSpace(w.Teams.TeamID)
+		w.Teams.ChannelName = strings.TrimPrefix(strings.TrimSpace(w.Teams.ChannelName), "#")
+		if w.Teams.Channel == "" {
+			w.Teams.ChannelName, w.Teams.TeamID = "", ""
+		}
+		if *w.Teams == (WorkflowTeams{}) {
+			w.Teams = nil
+		}
+	}
 }
 
 // slackChannelRE is the shape of a Slack conversation ID.
 var slackChannelRE = regexp.MustCompile(`^[CG][A-Z0-9]{6,}$`)
+
+// teamsChannelRE is the shape of a Teams conversation ID: "19:" and a
+// thread, which is what the channel list hands back.
+var teamsChannelRE = regexp.MustCompile(`^19:[^\s/]+$`)
 
 // Validate checks a normalized workflow.
 func (w *Workflow) Validate() error {
@@ -751,6 +806,14 @@ func (w *Workflow) Validate() error {
 	}
 	if w.Slack != nil && w.Slack.Channel != "" && !slackChannelRE.MatchString(w.Slack.Channel) {
 		return badRequest("invalid Slack channel ID %q: pick a channel from the list", w.Slack.Channel)
+	}
+	if w.Teams != nil && w.Teams.Channel != "" {
+		if !teamsChannelRE.MatchString(w.Teams.Channel) {
+			return badRequest("invalid Teams channel ID %q: pick a channel from the list", w.Teams.Channel)
+		}
+		if w.Teams.TeamID == "" {
+			return badRequest("a Teams channel needs the team it belongs to: pick a channel from the list")
+		}
 	}
 	return nil
 }

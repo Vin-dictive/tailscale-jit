@@ -1231,6 +1231,111 @@ func TestNotifierSeesEveryChange(t *testing.T) {
 	}
 }
 
+// TestNotifiersFanOut: Slack and Teams can both be connected, so a change
+// has to reach every notifier, and one of them failing must not rob the
+// others of the event.
+func TestNotifiersFanOut(t *testing.T) {
+	h := newHarness(t)
+	a, b := &recorder{}, &recorder{}
+	h.svc.Notify = Notifiers{a, panicker{}, b}
+	w := h.workflow(t, rdpFlow(false))
+	r, err := h.svc.Submit(ctx, alice, NewRequest{WorkflowID: w.ID, Reason: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Decline(ctx, bob, r.ID, "no"); err != nil {
+		t.Fatal(err)
+	}
+	for name, rec := range map[string]*recorder{"first": a, "second": b} {
+		got := rec.list()
+		if len(got) != 2 || !strings.HasSuffix(got[0], "submitted pending ") || !strings.HasSuffix(got[1], "declined declined ") {
+			t.Errorf("the %s notifier saw %v", name, got)
+		}
+	}
+}
+
+// panicker is a notifier that always fails, standing in for a bug in one
+// integration.
+type panicker struct{}
+
+func (panicker) RequestChanged(*AccessRequest, Event) { panic("boom") }
+
+// TestChatIdentityIsRecorded: a decision made from chat has to be
+// traceable to the account that made it, whichever chat system it was,
+// even after that account is renamed or its address changes.
+func TestChatIdentityIsRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		via       string
+		slackUser string
+		teamsUser string
+	}{
+		{"slack", ViaSlack, "T01/U42", ""},
+		{"teams", ViaTeams, "", "tenant-1/aad-42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			w := h.workflow(t, rdpFlow(false))
+			r, err := h.svc.Submit(ctx, alice, NewRequest{WorkflowID: w.ID, Reason: "x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := bob
+			actor.DeviceID, actor.Via = "", tc.via
+			actor.SlackUser, actor.TeamsUser = tc.slackUser, tc.teamsUser
+			got, err := h.svc.Approve(ctx, actor, r.ID, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Approvals) != 1 {
+				t.Fatalf("approvals = %+v", got.Approvals)
+			}
+			v := got.Approvals[0]
+			if v.Via != tc.via || v.SlackUser != tc.slackUser || v.TeamsUser != tc.teamsUser {
+				t.Errorf("vote = %+v, want via %q slack %q teams %q", v, tc.via, tc.slackUser, tc.teamsUser)
+			}
+			// Every timeline entry the actor caused carries it too, so the
+			// request page can say how each step was taken.
+			for _, ev := range got.Timeline {
+				if ev.Actor != actor.Actor() {
+					continue
+				}
+				if ev.Via != tc.via || ev.SlackUser != tc.slackUser || ev.TeamsUser != tc.teamsUser {
+					t.Errorf("timeline entry %q = %+v, want via %q slack %q teams %q", ev.Type, ev, tc.via, tc.slackUser, tc.teamsUser)
+				}
+			}
+		})
+	}
+}
+
+// TestBrowserOnlyPerChatSystem: the setting is per flow and per chat
+// system, so turning it on for Teams must not disarm Slack's buttons, or
+// the other way round.
+func TestBrowserOnlyPerChatSystem(t *testing.T) {
+	h := newHarness(t)
+	w := h.workflow(t, Workflow{
+		Name: "DB", Attribute: "db_ro",
+		Requesters: []Principal{"autogroup:member"}, Approvers: []Principal{"bob@example.com"},
+		MaxDuration: Duration(time.Hour),
+		Teams:       &WorkflowTeams{Channel: "19:room@thread.tacv2", TeamID: "19:team@thread.tacv2", BrowserOnly: true},
+	})
+	fromTeams, fromSlack := bob, bob
+	fromTeams.DeviceID, fromTeams.Via = "", ViaTeams
+	fromSlack.DeviceID, fromSlack.Via = "", ViaSlack
+
+	r, err := h.svc.Submit(ctx, alice, NewRequest{WorkflowID: w.ID, Reason: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Approve(ctx, fromTeams, r.ID, ""); err == nil {
+		t.Error("a browser-only flow accepted an approval from Teams")
+	}
+	// Slack is not browser-only on this flow, so it still decides.
+	if _, err := h.svc.Approve(ctx, fromSlack, r.ID, ""); err != nil {
+		t.Errorf("Slack should still decide this flow: %v", err)
+	}
+}
+
 func TestRecordSlackMessagesIsQuiet(t *testing.T) {
 	h := newHarness(t)
 	w := h.workflow(t, rdpFlow(false))
