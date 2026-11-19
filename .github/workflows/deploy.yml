@@ -1,0 +1,218 @@
+name: Deploy
+
+# Installs a published release on the jitd instance and restarts it: the
+# automated form of "Upgrading to a new release", path B, in jitd/README.md.
+#
+# The runner joins the tailnet as tag:ci for the length of the job, reaches the
+# instance over Tailscale SSH and swaps the binary, then checks jitd came back
+# by fetching /healthz over the tailnet. Nothing is exposed to the internet and
+# no long-lived credential sits on the instance.
+#
+# Before the first run:
+#   - Tailscale on the instance, as tag:jit-host, with Tailscale SSH on.
+#     jitd's own node (tag:jit) is a tsnet node and serves no SSH, so the host
+#     needs a node of its own. This is the one reason to install Tailscale on
+#     a host that jitd/README.md otherwise tells you to leave alone.
+#   - an SSH rule in the policy for tag:ci -> tag:jit-host. It has to be
+#     "accept": a rule whose source is tagged cannot use check mode.
+#   - an OAuth client with the auth_keys write scope, tagged tag:ci, as the
+#     TS_OAUTH_CLIENT_ID and TS_OAUTH_SECRET secrets.
+#   - the JITD_HOST repository variable, and sqlite3 on the instance.
+#
+# "release: published" does not fire for a release that release.yml made:
+# events raised by the GITHUB_TOKEN start no workflow run, and
+# workflow_dispatch is one of the two exceptions. release.yml therefore
+# dispatches this workflow itself. The release trigger below is for a release
+# somebody creates by hand in the UI.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to install, for example v0.8.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Never cancel a deploy in flight: a cancelled run can leave the new binary
+# installed and the service not yet restarted.
+concurrency:
+  group: deploy-jitd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment to hold a release for a human.
+    # Worth doing: a newer jitd brings jit.db up to its own schema on the first
+    # start, and that is one-way.
+    environment: production
+    steps:
+      - name: Settings
+        id: cfg
+        env:
+          VERSION: ${{ github.event.release.tag_name || inputs.version }}
+          HOST: ${{ vars.JITD_HOST }}
+          SSH_USER: ${{ vars.JITD_SSH_USER }}
+          URL: ${{ vars.JITD_URL }}
+          CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          [ -n "$VERSION" ] || fail "nothing to deploy: no release tag and no version input"
+          [ -n "$HOST" ] || fail "set the JITD_HOST repository variable to the instance's tailnet name (Settings -> Secrets and variables -> Actions -> Variables)"
+          [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ] ||
+            fail "set the TS_OAUTH_CLIENT_ID and TS_OAUTH_SECRET secrets from a Tailscale OAuth client with the auth_keys write scope, tagged tag:ci"
+
+          {
+            echo "version=$VERSION"
+            echo "host=$HOST"
+            echo "ssh_user=${SSH_USER:-deploy}"
+            echo "url=${URL:-http://jit}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@v4
+        with:
+          # The OAuth client mints a fresh ephemeral key for this run, so the
+          # node is gone once the job ends. An auth key works instead —
+          # reusable, ephemeral, tagged tag:ci, and pre-approved if the tailnet
+          # uses device approval — by putting
+          #   authkey: ${{ secrets.TS_AUTHKEY_CI }}
+          # in place of the two oauth lines. Tailscale deprecates that input in
+          # favour of an OAuth client; it is still the way in with Tailnet Lock.
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          # A node that has only just joined is not in every peer's map yet.
+          ping: ${{ steps.cfg.outputs.host }}
+
+      - name: Install the release and restart jitd
+        id: install
+        env:
+          HOST: ${{ steps.cfg.outputs.host }}
+          SSH_USER: ${{ steps.cfg.outputs.ssh_user }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+        run: |
+          set -euo pipefail
+          tailscale ssh "$SSH_USER@$HOST" bash -s -- "$REPO" "$VERSION" <<'REMOTE'
+          set -Eeuo pipefail
+          repo="$1"
+          version="$2"
+
+          # The wrong file installs happily and fails only at the restart, as
+          # "Exec format error", so let the instance say which one it wants.
+          arch=$(uname -m | sed 's/aarch64/arm64/; s/x86_64/amd64/')
+          case "$arch" in
+            amd64|arm64) ;;
+            *) echo "not a 64-bit Linux instance: uname -m says $(uname -m)" >&2; exit 1 ;;
+          esac
+          echo "installing $version ($arch) on $(hostname)"
+
+          # 1. Back up the database. The schema upgrade on the first start of a
+          # newer jitd is one transaction and cannot be undone, so a deploy
+          # without a backup is a deploy that cannot be walked back.
+          if ! command -v sqlite3 >/dev/null; then
+            echo "sqlite3 is not installed, so no consistent backup can be taken" >&2
+            echo "install it (apt-get install -y sqlite3, or dnf install -y sqlite) and run again" >&2
+            exit 1
+          fi
+          sudo -u jitd sh -c 'umask 077; sqlite3 -readonly /var/lib/jitd/jit.db ".backup /var/lib/jitd/jit-deploy-backup.db"'
+
+          # 2. Fetch the binary and check it against the release's checksums.
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          cd "$tmp"
+          base="https://github.com/$repo/releases/download/$version"
+          curl -fsSLO "$base/jitd-linux-$arch"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum --ignore-missing -c SHA256SUMS
+
+          # 3. Check it runs here before it becomes the binary jitd serves. A
+          # passing checksum says the file is intact, not that it is for this
+          # machine. -h exits non-zero, so read the output rather than the code.
+          chmod +x "jitd-linux-$arch"
+          help=$("./jitd-linux-$arch" -h 2>&1 || true)
+          case "$help" in
+            "usage: jitd"*) ;;
+            *) echo "the new binary does not run on this machine:" >&2
+               printf '%s\n' "$help" | head -3 >&2
+               exit 1 ;;
+          esac
+
+          # 4. Keep the binary that is serving now, so going back is one
+          # command. Everything after this point rolls itself back on failure.
+          sudo cp /usr/local/bin/jitd /usr/local/bin/jitd.prev
+          rollback() {
+            echo "the deploy failed after the swap: putting jitd.prev back" >&2
+            sudo install -m 755 /usr/local/bin/jitd.prev /usr/local/bin/jitd
+            sudo systemctl reset-failed jitd || true
+            sudo systemctl start jitd || true
+          }
+          trap rollback ERR
+
+          # 5. Swap and restart. install replaces the file rather than writing
+          # into it, so it works while jitd runs, where cp fails with "Text
+          # file busy". reset-failed is a no-op unless an earlier try
+          # crash-looped, after which systemd refuses to start the service.
+          sudo install -m 755 "jitd-linux-$arch" /usr/local/bin/jitd
+          sudo systemctl reset-failed jitd
+          sudo systemctl restart jitd
+
+          for _ in $(seq 30); do
+            systemctl is-active --quiet jitd && break
+            sleep 1
+          done
+          systemctl is-active --quiet jitd
+          # jitd has no -version flag: it stamps the version in at build time
+          # and reports it over MCP. The checksum is what identifies the file.
+          echo "jitd is running: $(sha256sum /usr/local/bin/jitd)"
+          REMOTE
+
+      - name: Check jitd is serving
+        id: health
+        env:
+          URL: ${{ steps.cfg.outputs.url }}
+        run: |
+          set -euo pipefail
+          # systemctl only says the process started. This says jitd is on the
+          # tailnet and answering, which is the thing people actually need, and
+          # it is only possible because the runner is on the tailnet too.
+          for _ in $(seq 30); do
+            if [ "$(curl -fsS --max-time 5 "$URL/healthz" || true)" = "ok" ]; then
+              echo "$URL/healthz says ok"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::$URL/healthz did not answer within 60s"
+          exit 1
+
+      # Only when the swap went in but jitd never came back: failures inside
+      # the install step roll themselves back, and a failure before it (a bad
+      # checksum, say) must not touch a jitd that is serving happily.
+      - name: Put the previous binary back
+        if: failure() && steps.install.outcome == 'success' && steps.health.outcome == 'failure'
+        env:
+          HOST: ${{ steps.cfg.outputs.host }}
+          SSH_USER: ${{ steps.cfg.outputs.ssh_user }}
+        run: |
+          set -euo pipefail
+          tailscale ssh "$SSH_USER@$HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          [ -f /usr/local/bin/jitd.prev ] || { echo "no /usr/local/bin/jitd.prev to go back to" >&2; exit 1; }
+          sudo install -m 755 /usr/local/bin/jitd.prev /usr/local/bin/jitd
+          sudo systemctl reset-failed jitd
+          sudo systemctl start jitd
+          REMOTE
+          # The database is left alone on purpose: restoring it would drop every
+          # decision made since the backup. If the old binary now refuses the
+          # database, that is the one-way schema upgrade, and "Going back" in
+          # jitd/README.md has the restore.
+          echo "::warning::rolled back to jitd.prev. If it will not start against jit.db, restore /var/lib/jitd/jit-deploy-backup.db by hand: see 'Going back' in jitd/README.md"
