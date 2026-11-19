@@ -1110,18 +1110,26 @@ Back up the database first, as in step 1 below.
    there afterwards, copy it to `jit-upgrade-backup.db-wal` as well. Leave
    jitd down and carry on with step 2 — step 4 starts it again.
 
-2. **Download the new binary** into a scratch directory, not over the one
-   that is running, and check it against the release's checksums. Let
-   `uname -m` choose the architecture rather than going by the instance
-   type: the wrong file installs happily and fails only at the restart, as
-   `Exec format error`. For a specific version, put `download/v0.8.0` in
-   place of `latest/download`.
+2. **Get the new binary** into a scratch directory, not over the one that
+   is running. Take it from a release (2a) or from a build of your own
+   (2b); either way it ends up at `/tmp/jitd-linux-$ARCH`, which is what
+   step 4 installs. Set `ARCH` first and let `uname -m` choose it rather
+   than going by the instance type: the wrong file installs happily and
+   fails only at the restart, as `Exec format error`.
 
    ```sh
    cd /tmp
    ARCH=$(uname -m | sed 's/aarch64/arm64/; s/x86_64/amd64/')
    echo "$ARCH"     # arm64 or amd64
+   ```
 
+   Stay in this shell for step 4, which uses `$ARCH` again.
+
+   **2a. A released binary.** Download it and check it against the
+   release's checksums. For a specific version, put `download/v0.8.0` in
+   place of `latest/download`.
+
+   ```sh
    curl -fsSLO https://github.com/atoonk/tailscale-jit/releases/latest/download/jitd-linux-$ARCH
    curl -fsSLO https://github.com/atoonk/tailscale-jit/releases/latest/download/SHA256SUMS
    sha256sum --ignore-missing -c SHA256SUMS
@@ -1130,7 +1138,58 @@ Back up the database first, as in step 1 below.
    It has to say `jitd-linux-$ARCH: OK`. If it doesn't, stop here: what you
    downloaded isn't what was released. A passing checksum says the file is
    intact, not that it's for this machine — `uname -m` is what says that.
-   Stay in this shell for step 4, which uses `$ARCH` again.
+
+   **2b. A binary you built yourself,** from a fork or an unreleased
+   commit. There are no published checksums for one of these, so the
+   check at the end of this step stands in for them.
+
+   *Either* build on your own machine and copy it across. Build for the
+   **instance's** architecture, not your laptop's — on an Apple Silicon
+   Mac a plain `go build` produces a darwin/arm64 binary that this
+   instance cannot run:
+
+   ```sh
+   # on your own machine, in a clone of the repository
+   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+     go build -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always)" \
+     -o dist/jitd-linux-amd64 ./jitd
+
+   scp dist/jitd-linux-amd64 ubuntu@<instance>:/tmp/jitd-linux-amd64
+   ```
+
+   Put the instance's `$ARCH` in place of `amd64` in all three places if
+   it is an arm64 instance (a Graviton one). `<instance>` is whatever you
+   normally ssh to — its tailnet name works, since the machine is on the
+   tailnet already.
+
+   *Or* build on the instance itself, which needs **Go 1.26.6** or newer
+   and roughly 2 GB of free memory. On a 1 GB instance the compile is
+   killed partway through, so build on your own machine instead:
+
+   ```sh
+   git clone https://github.com/atoonk/tailscale-jit /tmp/jitd-src
+   cd /tmp/jitd-src
+   CGO_ENABLED=0 go build -trimpath \
+     -ldflags "-s -w -X main.version=$(git describe --tags --always)" \
+     -o /tmp/jitd-linux-$ARCH ./jitd
+   cd /tmp
+   ```
+
+   Clone your own fork in place of that URL to build its `main`, or
+   `git checkout` the commit you want after cloning.
+
+   Then, whichever way you built it, check that the file runs on this
+   machine before it becomes the one jitd serves:
+
+   ```sh
+   chmod +x /tmp/jitd-linux-$ARCH
+   /tmp/jitd-linux-$ARCH -h | head -2
+   ```
+
+   It has to print `usage: jitd [flags]`. `Exec format error` means the
+   binary is for the other architecture — go back and rebuild with the
+   `$ARCH` this machine reported. This runs the new binary without a
+   database or a tailnet, so it cannot disturb the jitd that is serving.
 
 3. **Keep the binary you are running now,** so a rollback is one command:
 
