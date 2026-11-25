@@ -704,6 +704,37 @@ func TestRenderEscapes(t *testing.T) {
 	}
 }
 
+// TestManifestFields keeps the manifest to the fields the declared schema
+// version defines. The schema sets additionalProperties:false, so a field
+// it does not know fails the upload outright, with a schema validation
+// error and no app: that is how packageName, retired after 1.16, got as
+// far as a tenant.
+func TestManifestFields(t *testing.T) {
+	// The top-level properties of MicrosoftTeams.schema.json v1.17.
+	allowed := []string{
+		"$schema", "manifestVersion", "version", "id", "developer", "name",
+		"description", "icons", "accentColor", "bots", "permissions",
+		"validDomains", "localizationInfo", "staticTabs", "configurableTabs",
+		"connectors", "composeExtensions", "webApplicationInfo", "showLoadingIndicator",
+		"isFullScreen", "activities", "devicePermissions", "defaultInstallScope",
+		"defaultGroupCapability", "subscriptionOffer", "meetingExtensionDefinition",
+		"authorization", "extensions", "actions", "dashboardCards", "copilotExtensions",
+		"elementRelationshipSet", "publisherDocsUrl", "defaultBlockUntilAdminAction",
+		"configurableProperties", "supportedChannelTypes", "graphConnector",
+	}
+	for k := range Manifest("00000000-0000-0000-0000-000000000000", "https://jit.example.ts.net") {
+		if !slicesContains(allowed, k) {
+			t.Errorf("manifest has %q, which schema v%s does not define: Teams refuses the upload", k, manifestVersion)
+		}
+	}
+	// Everything the schema requires is there, or the upload fails the other way.
+	for _, req := range []string{"manifestVersion", "version", "id", "developer", "name", "description", "icons", "accentColor"} {
+		if _, ok := Manifest("app-id", "https://jit.example.ts.net")[req]; !ok {
+			t.Errorf("manifest lacks the required field %q", req)
+		}
+	}
+}
+
 func slicesContains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

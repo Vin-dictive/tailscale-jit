@@ -28,6 +28,11 @@ const ManifestPath = "/admin/teams/manifest.zip"
 // deliberately a little behind the newest: a manifest a tenant's Teams
 // does not understand is refused at upload, which is a worse failure than
 // missing the newest field.
+//
+// The schema sets additionalProperties:false, so a field that has been
+// retired is not ignored at upload, it is rejected: packageName was valid
+// up to 1.16 and gone by 1.17. Anything added here has to exist in this
+// version of the schema; TestManifestFields guards the list.
 const manifestVersion = "1.17"
 
 // projectURL stands in for the developer URLs. Teams requires https URLs
@@ -42,7 +47,6 @@ func Manifest(appID, baseURL string) map[string]any {
 		"manifestVersion": manifestVersion,
 		"version":         "1.0.0",
 		"id":              appID,
-		"packageName":     "com.github.atoonk.tailscalejit",
 		"developer": map[string]any{
 			"name":          "tailscale-jit",
 			"websiteUrl":    projectURL,
