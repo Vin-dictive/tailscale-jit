@@ -710,10 +710,11 @@ func TestRenderEscapes(t *testing.T) {
 // error and no app: that is how packageName, retired after 1.16, got as
 // far as a tenant.
 func TestManifestFields(t *testing.T) {
-	// The top-level properties of MicrosoftTeams.schema.json v1.17.
+	// The top-level properties of MicrosoftTeams.schema.json devPreview.
 	allowed := []string{
 		"$schema", "manifestVersion", "version", "id", "developer", "name",
 		"description", "icons", "accentColor", "bots", "permissions",
+		"supportsChannelFeatures",
 		"validDomains", "localizationInfo", "staticTabs", "configurableTabs",
 		"connectors", "composeExtensions", "webApplicationInfo", "showLoadingIndicator",
 		"isFullScreen", "activities", "devicePermissions", "defaultInstallScope",

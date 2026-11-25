@@ -24,16 +24,20 @@ const AppName = "JIT access"
 // with the configured app ID already in it.
 const ManifestPath = "/admin/teams/manifest.zip"
 
-// manifestVersion is the Teams app manifest schema this targets. Held
-// deliberately a little behind the newest: a manifest a tenant's Teams
-// does not understand is refused at upload, which is a worse failure than
-// missing the newest field.
+// manifestVersion is the Teams app manifest schema this targets.
 //
-// The schema sets additionalProperties:false, so a field that has been
-// retired is not ignored at upload, it is rejected: packageName was valid
-// up to 1.16 and gone by 1.17. Anything added here has to exist in this
-// version of the schema; TestManifestFields guards the list.
-const manifestVersion = "1.17"
+// The schema sets additionalProperties:false, so a field that is not in
+// this exact version is not ignored at upload, it is rejected: packageName
+// was valid up to 1.16 and gone by 1.17. Anything added here has to exist
+// in this version of the schema; TestManifestFields guards the list.
+//
+// devPreview, not a numbered version, because supportsChannelFeatures is
+// defined nowhere else: it is absent from 1.16 through 1.23. The portal
+// asks for it to reach every channel type, and the field and the version
+// have to move together or the package fails validation. The cost is that
+// a tenant which refuses preview manifests refuses this one; if that
+// happens, drop supportsChannelFeatures and come back to 1.17.
+const manifestVersion = "devPreview"
 
 // projectURL stands in for the developer URLs. Teams requires https URLs
 // that it can parse, and jitd's own address is usually http://jit, which
@@ -62,6 +66,10 @@ func Manifest(appID, baseURL string) map[string]any {
 				"Type \"help\" to the bot to see what it understands.",
 		},
 		"accentColor": "#4F46E5",
+		// tier1 is the full set of channel features. jitd only posts cards
+		// and reads rosters, so there is nothing in the higher tier it uses;
+		// this is what the portal asks for to allow every channel type.
+		"supportsChannelFeatures": "tier1",
 		"bots": []any{map[string]any{
 			"botId":              appID,
 			"scopes":             []string{"personal", "team", "groupChat"},
@@ -110,11 +118,11 @@ func (b *Bot) AppPackage() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	colorIcon, err := encodePNG(keyhole(192, accent, white))
+	colorIcon, err := encodePNG(dotgrid(192, accent, white))
 	if err != nil {
 		return nil, err
 	}
-	outlineIcon, err := encodePNG(keyhole(32, color.RGBA{}, white))
+	outlineIcon, err := encodePNG(dotgrid(32, color.RGBA{}, white))
 	if err != nil {
 		return nil, err
 	}
@@ -147,12 +155,54 @@ var (
 	white  = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
 )
 
-// keyhole draws the app icon: a keyhole in fg on bg, at size square. The
-// icons are drawn rather than embedded so there are no binary assets to
-// keep in step with the code, and so the outline icon, which Teams wants
-// transparent, is the same shape as the colour one.
+// dotgrid draws the app icon: the three-by-three mesh of dots Tailscale is
+// known by, in fg on bg, at size square. Dots because they survive 32
+// pixels, where anything finer turns to mush, and because the shape is
+// geometry rather than an asset: nothing to keep in step with the code,
+// and the outline icon Teams wants transparent is the same shape as the
+// colour one.
 //
 // A transparent bg (zero alpha) gives the outline icon.
+func dotgrid(size int, bg, fg color.RGBA) image.Image {
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	s := float64(size)
+	// Geometry as fractions of the icon, so both sizes look the same.
+	centres := []float64{s * 0.26, s * 0.50, s * 0.74}
+	r := s * 0.088
+
+	// 3x3 supersampling: at 32 pixels a hard edge looks broken.
+	const ss = 3
+	inside := func(x, y float64) bool {
+		for _, cy := range centres {
+			for _, cx := range centres {
+				if math.Hypot(x-cx, y-cy) <= r {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for py := range size {
+		for px := range size {
+			hits := 0
+			for sy := range ss {
+				for sx := range ss {
+					x := float64(px) + (float64(sx)+0.5)/ss
+					y := float64(py) + (float64(sy)+0.5)/ss
+					if inside(x, y) {
+						hits++
+					}
+				}
+			}
+			img.Set(px, py, blend(bg, fg, float64(hits)/(ss*ss)))
+		}
+	}
+	return img
+}
+
+// keyhole draws the previous app icon, a keyhole in fg on bg. Kept because
+// the mesh is a brand mark and a tenant that would rather not carry one can
+// go back to this by name.
 func keyhole(size int, bg, fg color.RGBA) image.Image {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	s := float64(size)

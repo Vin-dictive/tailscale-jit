@@ -931,6 +931,11 @@ minutes and no restart:
    (`xapp-…`, under Basic Information → App-Level Tokens).
 4. **Paste both** on the Slack page, with the email domains your people use
    in Slack, and click Connect.
+5. **Give it an icon**, optional. A Slack app manifest cannot carry one, so
+   this is the one thing the button cannot fill in: upload a 512×512 PNG at
+   api.slack.com/apps → *your app* → Basic Information → Display Information.
+   Microsoft Teams needs nothing here, because the app package jitd builds
+   has the icons in it already.
 
 Then pick a channel on each approval flow's page, and optionally have jitd
 send each approver a direct message.
