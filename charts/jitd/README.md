@@ -8,11 +8,12 @@ There is no Service or Ingress. jitd listens only on its tailnet address, so the
 
 ## Before you install
 
-Do steps 1 and 2 of jitd's [Install](../../jitd/README.md#install) guide first:
+Do steps 1 to 3 of jitd's [Install](../../jitd/README.md#install) guide first:
 1. In the policy file, add `tag:jit` and a grant that lets people reach it.
 2. Create an auth key tagged `tag:jit` (optional: without one, jitd logs a login URL).
+3. Create the OAuth client for the Tailscale API.
 
-The OAuth client for the Tailscale API (step 4 of that guide) can go in the Secret too, as below. Leave it out and you paste it on jitd's Integrations page after the install; it is then kept in jitd's database on the data volume.
+Put the OAuth client in the Secret, as below, so jitd has it on its first start: it can then resolve the `group:` admins and approvers from your policy file straight away. Leave it out and you paste it on jitd's Integrations page after the install instead, which needs `admins` to already name you by login.
 
 Then put the credentials in a Secret, using whatever you normally use for secrets (External Secrets, Sealed Secrets, SOPS, ...). For example:
 
@@ -50,7 +51,7 @@ Then follow the install notes:
 - **With an auth key,** the node joins the tailnet by itself.
 - **Without one,** get the login URL from `kubectl -n jitd logs deploy/jitd`, approve the machine, and tag it `tag:jit` in the admin console.
 
-Either way, jitd is then at `http://jit/`; continue with step 4 of the install guide.
+Either way, jitd is then at `http://jit/`; continue with step 5 of the install guide. Check that it counts you as an admin before you go on: `curl -s http://jit/v1/me` should say `"admin": true`. If it says `false`, the `admins` value is not your Tailscale login as Tailscale spells it (`login` in that same answer).
 
 The auth key is used only on the first start, while the volume holds no node identity. You can remove it from the Secret afterwards.
 

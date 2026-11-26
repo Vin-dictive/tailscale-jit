@@ -80,13 +80,13 @@ step:
 
 1. Add a `group:jit-admins` group and let people reach `tag:jit` in the policy.
 2. Create an auth key (tagged `tag:jit`).
-3. Run jitd: on a Mac to try it out, or on a small EC2 instance as a
-   systemd service to keep it.
-4. Connect it to the Tailscale API at http://jit/admin/integrations: the
-   page walks you through creating an OAuth client, and tests it before
-   saving it.
-5. Create an approval flow.
-6. Paste the policy snippet jitd gives you.
+3. Create an OAuth client for the Tailscale API, with three scopes.
+4. Run jitd with both credentials: on a Mac to try it out, or on a small
+   EC2 instance as a systemd service to keep it.
+5. Check the connection at http://jit/admin/integrations, which tests the
+   credential the way an approval will use it.
+6. Create an approval flow.
+7. Paste the policy snippet jitd gives you.
 
 jitd is a single self-contained binary, with the web UI built into it:
 download it from the

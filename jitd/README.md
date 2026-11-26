@@ -46,8 +46,8 @@ You need:
 
 ## Install
 
-Steps 1 and 2 happen in the admin console and are the same whichever way
-you run jitd. Step 3 is where the paths split:
+Steps 1 to 3 happen in the admin console and are the same whichever way
+you run jitd. Step 4 is where the paths split:
 
 | | |
 |---|---|
@@ -90,8 +90,8 @@ within a minute.
 
 jitd joins the tailnet as a machine of its own, and an **auth key** is what
 lets it in. It is used once, on the first start. You need an Owner, Admin,
-IT admin or Network admin role to create one. (The credential for the
-Tailscale API comes later, in step 4, from jitd's own page.)
+IT admin or Network admin role to create one. (The credential jitd uses to
+*grant* access is a different thing; it comes next, in step 3.)
 
 1. Open **Settings → Keys**
    ([direct link](https://console.tailscale.com/admin/settings/keys)) and
@@ -113,11 +113,51 @@ Tailscale API comes later, in step 4, from jitd's own page.)
    a login URL on its first start. Open it, approve the machine, and tag
    it `tag:jit` yourself in the admin console.
 
-### 3. Run it
+### 3. Create the OAuth client
+
+This is the credential jitd uses to set and remove posture attributes,
+which is how an approval turns access on and off. Create it now, before
+jitd runs, and step 4 hands it to jitd on its very first start. That order
+matters: a jitd that starts with the credential can read the policy file,
+so `group:jit-admins` from step 1 makes you an admin straight away. Without
+it, groups cannot be resolved, and the only way into the admin pages is a
+login spelled exactly right in `-admins`.
+
+1. Open **Settings → Trust credentials → New credential**
+   ([direct link](https://console.tailscale.com/admin/settings/trust-credentials/add))
+   and pick **OAuth**.
+2. Add a description such as `jitd`.
+3. On the **Scopes** step, give it these three:
+
+   - **Devices → Posture attributes: Write**, so it can set and remove the
+     attributes. This is how an approval turns access on and off.
+   - **Devices → Core: Read**, so it can list a person's devices when they
+     request access from Slack (`/jit request`), where it can't tell which
+     device they are on.
+   - **Policy file: Read**, so it can resolve `group:` admins and approvers,
+     check each flow against the policy, and tell you what to add to it.
+
+4. Create the client, then copy the **client ID** and the **secret**
+   (`tskey-client-...`). The secret is shown only once.
+
+An API access token (`tskey-api-...`) works in place of the OAuth client
+(`TS_API_KEY=tskey-api-...`), but it expires within 90 days and then jitd
+stops being able to grant anything. Use the OAuth client.
+
+You can skip this step and paste the client into the form on
+**http://jit/admin/integrations** after jitd is up, as earlier releases of
+this guide had it — but only if you can open that page, which needs
+`-admins` to name you by login already. Creating it now is the path with no
+way to lock yourself out.
+
+### 4. Run it
 
 Pick one: **A** on your Mac to try it out, **B** on an EC2 instance to
 keep it, or **C** on a Kubernetes cluster you already run. They all end in
 the same place, with jitd on the tailnet at `http://jit/`.
+
+Each path does the same three things: get the binary, put the two
+credentials from steps 2 and 3 where jitd will read them, and start it.
 
 #### A. On a Mac, to try it out
 
@@ -150,24 +190,46 @@ memory to compile: `go install github.com/atoonk/tailscale-jit/jitd@latest`
 puts `jitd` in `~/go/bin` without a clone, or clone the repository and run
 `go build -o jitd ./jitd`.
 
+**Write the env file.** The OAuth client from step 3 goes next to the
+binary, so jitd has it from its first start:
+
+```sh
+umask 077
+cat > env <<'EOF'
+TS_OAUTH_CLIENT_ID=...
+TS_OAUTH_CLIENT_SECRET=tskey-client-...
+EOF
+```
+
 **Start it.** Pass the auth key from step 2 (just this once: later starts
 don't need it), and make the `group:jit-admins` group the admins, plus
 your own login as a fallback. Put your key and your login in place of
 `tskey-auth-...` and `you@example.com`:
 
 ```sh
-TS_AUTHKEY=tskey-auth-... ./jitd -admins group:jit-admins,you@example.com
+TS_AUTHKEY=tskey-auth-... ./jitd -admins group:jit-admins,you@example.com -env-file env
 ```
 
+`you@example.com` is a placeholder. It has to be your own Tailscale login,
+spelled the way Tailscale spells it — jitd only checks that it *looks* like
+a login, so leaving it as it is gives you a jitd that starts cleanly, logs
+nothing wrong, and shows you "Admins only".
+
 When the log says `serving url=http://jit.<your-tailnet>.ts.net/`, open
-**http://jit/** from any device on the tailnet and carry on with step 4, which connects it to the Tailscale API.
+**http://jit/** from any device on the tailnet. Check that it knows you:
+
+```sh
+curl -s http://jit/v1/me     # "admin": true
+```
+
+Then carry on with [step 5](#5-check-the-tailscale-connection).
 
 While you're trying it out:
 
-- jitd runs in that terminal and stops with Ctrl-C. Everything it needs
-  lands in the directory you started it from (`tsnet-state` and `jit.db`),
-  so starting it there again is the same machine with the same flows, and
-  no auth key.
+- jitd runs in that terminal and stops with Ctrl-C. Everything it needs is
+  in the directory you started it from (`tsnet-state`, `jit.db` and `env`),
+  so starting it there again — with the same `-env-file env` — is the same
+  machine with the same flows, and no auth key.
 - Your Mac has to be awake and online for people to request or approve.
   Access already granted keeps working while jitd is down, and still ends
   on time, because the expiry lives in the attribute Tailscale holds.
@@ -181,7 +243,10 @@ will do: a `t4g.small` running Amazon Linux 2023 or Ubuntu is plenty. Any
 always-on Linux host with systemd works the same way; only the first step
 is specific to EC2.
 
-**1. Launch the instance.** Nothing has to reach it from outside the
+Path B has steps of its own, numbered **B1** to **B6** so they can't be
+confused with the numbered steps of the install.
+
+**B1. Launch the instance.** Nothing has to reach it from outside the
 tailnet:
 
 - **No inbound rules** in the security group for jitd itself — people
@@ -196,7 +261,7 @@ tailnet:
   in `/var/lib/jitd`. Stopping and starting the instance is fine; the node
   comes back as the same machine.
 
-**2. Install the binary.** Nothing to clone and no Go on the instance:
+**B2. Install the binary.** Nothing to clone and no Go on the instance:
 jitd is one self-contained file with the web UI built into it, and
 compiling it needs roughly 2 GB of free memory, more than the smallest
 instances have. There is one release file per architecture, and the wrong
@@ -222,25 +287,40 @@ the right file for this machine.
 move to a new release, see
 [Upgrading to a new release](#upgrading-to-a-new-release).
 
-**3. Make a user.** jitd needs no privileges of its own:
+**B3. Make a user.** jitd needs no privileges of its own:
 
 ```sh
 sudo useradd --system --home-dir /var/lib/jitd --create-home jitd
 sudo install -d -o jitd -m 700 /etc/jitd
 ```
 
-**4. Write the service.** Open an empty unit file:
+**B4. Write the env file.** The OAuth client from step 3 goes in
+`/etc/jitd/env`, which is the `-env-file` the unit below points at. Put
+your own client ID and secret in place of the dots:
 
 ```sh
-sudo vi /etc/systemd/system/jitd.service
+sudo sh -c 'umask 077; cat > /etc/jitd/env' <<'EOF'
+TS_OAUTH_CLIENT_ID=...
+TS_OAUTH_CLIENT_SECRET=tskey-client-...
+EOF
+sudo chown jitd /etc/jitd/env
 ```
 
-Press `i` to start typing, paste the block below, and change
-`you@example.com` in the `ExecStart` line to your own Tailscale login
-(keep `group:jit-admins` from step 1, and keep the comma between them).
-Then press `Esc`, type `:wq` and press Enter to save and close.
+jitd reads this file on every start and whenever it needs the credential,
+so a changed file needs no restart. A credential here is never written to
+jitd's database.
 
-```ini
+**B5. Write the service.** The one thing to get right is `-admins`: put
+your own Tailscale login in `ADMIN` below, spelled the way Tailscale spells
+it (`curl -s http://jit/v1/me` tells you, once jitd is up; the admin
+console's Users page tells you now). `group:jit-admins` from step 1 stays
+next to it, with the comma. Setting it first and letting the heredoc fill it
+in is safer than editing the line afterwards:
+
+```sh
+ADMIN=you@example.com     # <- your login, not this placeholder
+
+sudo tee /etc/systemd/system/jitd.service >/dev/null <<EOF
 # /etc/systemd/system/jitd.service
 [Unit]
 Description=jitd: just-in-time access for Tailscale
@@ -250,7 +330,7 @@ Wants=network-online.target
 [Service]
 User=jitd
 WorkingDirectory=/var/lib/jitd
-ExecStart=/usr/local/bin/jitd -admins group:jit-admins,you@example.com -env-file /etc/jitd/env
+ExecStart=/usr/local/bin/jitd -admins group:jit-admins,$ADMIN -env-file /etc/jitd/env
 # Only for the first start; see below. The "-" means it may be missing.
 EnvironmentFile=-/etc/jitd/authkey
 Restart=on-failure
@@ -261,9 +341,17 @@ PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+grep ExecStart /etc/systemd/system/jitd.service   # your login, not the placeholder
 ```
 
-**5. Start it.** The auth key from step 2 goes in a file of its own, which
+jitd only checks that each `-admins` entry *looks* like a login, never that
+it matches anyone: leave the placeholder in and jitd starts cleanly, logs
+nothing wrong, and answers every admin page with "Admins only". The `grep`
+is the whole check.
+
+**B6. Start it.** The auth key from step 2 goes in a file of its own, which
 you delete once the machine shows up in the admin console. Put your own
 key in place of `tskey-auth-...`:
 
@@ -276,9 +364,32 @@ sudo rm /etc/jitd/authkey
 sudo systemctl status jitd
 ```
 
-Open **http://jit/** from any device on the tailnet and carry on with
-step 4. If the log shows an error instead, fix it and
-`sudo systemctl restart jitd`.
+Watch that log for the name it serves. If it says `jit-1` rather than
+`jit`, a machine called `jit` already exists and `http://jit/` is that
+other one, not this jitd — see **The name is taken?** below.
+
+Then, from any device on the tailnet:
+
+```sh
+curl -s http://jit/v1/me     # "admin": true
+```
+
+When that says `true`, open **http://jit/** from any device on the tailnet
+and carry on with [step 5](#5-check-the-tailscale-connection). If the log
+shows an error instead of serving, fix it and `sudo systemctl restart jitd`.
+
+If it says `"admin": false`, jitd is running and reachable but doesn't
+count you as an admin. Two things to compare against the `login` in that
+same answer:
+
+```sh
+systemctl show jitd -p ExecStart     # the -admins value systemd really loaded
+```
+
+the login in `-admins` — fix `ADMIN` in B5, then
+`sudo systemctl daemon-reload` and `sudo systemctl restart jitd` — and the
+logins in `group:jit-admins` in the policy file. The group only resolves
+once step 5 passes, so until then the login is the one that counts.
 
 **Coming from path A?** Then skip the auth key. Stop jitd on the Mac, copy
 its `tsnet-state` directory and `jit.db` (and `jit.db-wal`, if it's there)
@@ -296,15 +407,21 @@ instances against the same database file.
 The Helm chart in [`charts/jitd`](../charts/jitd) runs jitd as one pod.
 An init container downloads the release binary and checks its checksum,
 and a persistent volume keeps the node identity and the database. Put the
-auth key from step 2 in a Secret, then install the chart from a checkout
-of this repository. (The same Secret can hold the OAuth client from step
-4, which then never touches the database.)
+auth key from step 2 and the OAuth client from step 3 in one Secret, so
+jitd has both on its first start and neither touches the database. Then
+install the chart from a checkout of this repository:
 
 ```sh
 helm install jitd ./charts/jitd -n jitd \
   --set credentials.existingSecret=jitd-credentials \
   --set 'admins={you@example.com,group:jit-admins}'
 ```
+
+`you@example.com` is a placeholder: put your own Tailscale login there, or
+the admin pages stay closed to you. `kubectl -n jitd get deploy jitd -o
+jsonpath='{.spec.template.spec.containers[0].args}'` shows what the pod is
+really running with, and `curl -s http://jit/v1/me` says whether jitd
+counts you as an admin.
 
 The [chart's README](../charts/jitd/README.md) covers the Secret, the
 values and upgrades.
@@ -320,6 +437,13 @@ Things to know:
   groups are looked up through the Tailscale API, so with a broken
   credential only a login can still get in to fix it. With no admins, nobody
   can create flows.
+
+  Nothing validates a login beyond its shape, so a placeholder or a typo
+  here is the one mistake that locks you out of your own jitd, silently.
+  `curl -s http://jit/v1/me` from your own device answers both halves at
+  once: `login` is the spelling jitd sees, and `admin` is whether it
+  matched. If it says `false`, compare the two and restart with the login
+  from `login`.
 - **Keep two things:** the node's identity in `tsnet-state` (`-state-dir`)
   and the flows and requests in the SQLite database `jit.db` (`-data`).
   Both sit in the directory jitd runs from: where you started it in path
@@ -343,64 +467,56 @@ Things to know:
 - **No auth key?** Then jitd logs a login URL instead (path B: find it
   with `sudo journalctl -u jitd`; path C: `kubectl -n jitd logs deploy/jitd`).
   Open it, approve the machine, and tag it `tag:jit` in the admin console.
-- **No API credential yet?** jitd still starts and serves the UI; it just
-  can't grant anything until step 4 is done.
+- **No API credential yet?** jitd still starts and serves the UI. It just
+  can't grant anything, and it can't resolve `group:` or `tag:` principals
+  either — so admins, requesters and approvers named by group match nobody
+  until step 5 passes. This is why step 3 comes before you start jitd.
 
-### 4. Connect it to the Tailscale API
+### 5. Check the Tailscale connection
 
 As an admin, open **http://jit/admin/integrations**. The first tab,
-**Tailscale**, has the steps and a form. jitd needs an **OAuth client** to
-set and remove posture attributes, which is how an approval turns access
-on and off:
+**Tailscale**, shows what jitd makes of the credential you gave it in
+step 4. If it passes, there is nothing to do here and you can go on to
+step 6.
 
-1. Open **Settings → Trust credentials → New credential**
-   ([direct link](https://console.tailscale.com/admin/settings/trust-credentials/add))
-   and pick **OAuth**.
-2. Add a description such as `jitd`.
-3. On the **Scopes** step, give it these three:
+**Didn't set one yet?** The same page has a form: paste the client ID and
+the secret from step 3 into it and click **Test and save**. That keeps the
+credential in jitd's database instead of a file, which is the only
+difference. Reaching this page needs `-admins` to name you, so this is the
+path that assumes nothing went wrong there.
 
-   - **Devices → Posture attributes: Write**, so it can set and remove the
-     attributes. This is how an approval turns access on and off.
-   - **Devices → Core: Read**, so it can list a person's devices when they
-     request access from Slack (`/jit request`), where it can't tell which
-     device they are on.
-   - **Policy file: Read**, so it can resolve `group:` approvers, check each
-     flow against the policy, and tell you what to add to it.
-
-4. Create the client, then copy the **client ID** and the **secret**
-   (`tskey-client-...`). The secret is shown only once.
-5. Paste both into the form on the page and click **Test and save**.
-
-jitd tries the credential before it keeps it, the same way an approval
-will use it:
+Either way, jitd tries the credential before it trusts it, the same way an
+approval will use it:
 
 1. It reads the policy file.
 2. It reads jitd's own device attributes.
 3. It writes a throwaway attribute (`custom:jit_selfcheck`) on jitd's own
    node, and deletes it again.
 
-If something fails, the page says what to fix and nothing is saved. When
-everything passes, the client is stored in jitd's database and used from
-then on, with no restart. The secret is never shown again, on the page or
-in the API. **Replace** takes a new client the same way, and **Remove**
-forgets it.
+If something fails, the page says what to fix: a credential from a file is
+reported as broken and jitd goes on granting nothing until the file is
+right, and one pasted into the form is not saved at all. When everything
+passes, jitd uses it from then on, with no restart.
 
-An API access token (`tskey-api-...`) works in place of the OAuth client
-(the page takes one too), but it expires within 90 days and then jitd
-stops being able to grant anything. Use the OAuth client.
+Where the credential lives, and which one wins:
 
-**Rather keep the secret out of the database?** Put it in jitd's env file
-(`-env-file`; `/etc/jitd/env` in path B) or in its environment (the
-Secret in path C) instead:
+- **In the env file** (`-env-file`: `env` in path A, `/etc/jitd/env` in
+  path B) or the environment (the Secret in path C). This is what step 4
+  set up. It never enters the database, it wins over anything saved on the
+  page, and the page then shows the check without the form. A changed file
+  needs no restart: click **Check again**.
 
-```sh
-TS_OAUTH_CLIENT_ID=...
-TS_OAUTH_CLIENT_SECRET=tskey-client-...
-```
+  ```sh
+  TS_OAUTH_CLIENT_ID=...
+  TS_OAUTH_CLIENT_SECRET=tskey-client-...
+  ```
 
-A credential set there wins over one saved on the page, and the page then
-shows the check without the form. A changed file needs no restart: click
-**Check again**.
+- **Saved on the page**, if you used the form instead. It is kept in jitd's
+  database, and the secret is never shown again, on the page or in the API.
+  **Replace** takes a new client the same way, and **Remove** forgets it.
+
+An API access token (`TS_API_KEY=tskey-api-...`) works in either place, but
+it expires within 90 days and then jitd stops being able to grant anything.
 
 **Rather store no secret at all?** Where jitd's platform issues it an OIDC
 identity token (a Kubernetes service account token, a cloud workload
@@ -436,7 +552,7 @@ joined before doesn't need.
 The other tabs under Integrations (Slack, Okta, Google Groups) are optional and work the
 same way: steps, a form, and a test before anything is saved.
 
-### 5. Create an approval flow
+### 6. Create an approval flow
 
 Go to **Manage → Approval flows → New flow**. A flow is one kind of access
 people can ask for. For example:
@@ -506,7 +622,7 @@ hosts" are three flows, however many databases and hosts there are. Fewer
 flows means fewer attributes to add to the policy, and gives people and
 agents a short list of clearly different things to choose between.
 
-### 6. Add the flow to the policy
+### 7. Add the flow to the policy
 
 jitd never edits your policy; you paste in what it suggests. Open
 **Manage → Policy snippet** (or run `jitd -policy-snippet` in the
@@ -567,7 +683,7 @@ is defined, shows which grants use it, and says whether they match
 "Gives access to". If no grant uses the flow, the page says so, because
 approving it would unlock nothing.
 
-### 7. Try it
+### 8. Try it
 
 1. On your laptop, open http://jit/.
 2. Pick the flow and ask for 15 minutes.
@@ -979,22 +1095,43 @@ jitd can do the same in Microsoft Teams, independently of Slack: a flow may
 announce in either, both or neither. Set it up on **Integrations →
 Microsoft Teams**; no restart:
 
-1. **Register the app in Entra.** In the Microsoft Entra admin centre, go to
-   **App registrations → New registration**, name it *JIT access* and pick
-   **Accounts in this organizational directory only**. Copy the
-   **Application (client) ID** and the **Directory (tenant) ID**, then under
-   **Certificates & secrets → Client secrets → New client secret** copy the
-   secret's **Value** (not its ID; the value is shown once).
-2. **Create the bot and turn on socket mode.** In the Teams Developer
-   Portal, under **Tools → Bot management**, create a bot using that app ID,
-   open it, choose **Configure**, and under **Delivery method** pick
-   **Socket mode**.
-3. **Paste the three values** on the Microsoft Teams page, with the email
-   domains your people use, and click Connect.
-4. **Install the app in a team.** Download the app package from the page and
-   upload it in Teams (**Apps → Manage your apps → Upload a custom app**),
-   then add it to a team. Uploading custom apps has to be allowed in the
-   Teams admin centre.
+1. **Create the bot.** In the [Teams Developer
+   Portal](https://dev.teams.microsoft.com/bots), go to **Tools → Bot
+   management → + New Bot**, name it *JIT access* and add it. The **Bot ID**
+   it is given is the app ID jitd needs: creating the bot also creates a
+   matching app registration in Entra under that same ID. Start here rather
+   than in Entra — an app registration that was never registered as a bot
+   gets *Authorization has been denied for this request* from Teams, which
+   says nothing about the cause.
+2. **Turn on socket mode.** Open the bot, choose **Configure**, and under
+   **Delivery method** pick **Socket mode**, then Save and wait for **Socket
+   Mode is on**. Socket mode is only available for newly created bots.
+3. **Make the app registration single-tenant.** In the [Microsoft Entra
+   admin centre](https://entra.microsoft.com/), under **App registrations**,
+   open the registration the Developer Portal just made (its Application
+   (client) ID is the bot ID) and set **Manage → Authentication → Supported
+   account types** to **Accounts in this organizational directory only**.
+   Copy the **Directory (tenant) ID** while you are there. New registrations
+   are multi-tenant, and a multi-tenant bot's token has to be asked for as
+   Microsoft's own tenant rather than yours; jitd asks as yours, so Entra
+   issues a token and Teams then refuses the connection. The change can take
+   up to an hour to reach Teams.
+4. **Create a client secret.** On the bot's page in the Developer Portal,
+   under **Client secrets → New client secret** — or in Entra under
+   **Certificates & secrets → Client secrets → New client secret**. Copy the
+   **Value** (not its ID; the value is shown once).
+5. **Paste the bot ID, the secret and the tenant ID** on the Microsoft Teams
+   page, with the email domains your people use, and click Connect. Wait for
+   all three regions to say connected.
+6. **Install the app in a team.** Download the app package from the page,
+   upload it in the [Teams admin centre](https://admin.teams.microsoft.com/)
+   (**Teams apps → Manage apps → Actions → Upload new app**), then add it to
+   a team in Teams. Uploading from the Teams client (**Apps → Manage your
+   apps → Upload a custom app**) does the same, if your tenant lets people
+   upload custom apps. Install it after jitd is connected: jitd learns which
+   teams it is in from the message Teams sends over the socket when the app
+   is added, so an install that happens while jitd is disconnected goes
+   unnoticed — remove the app and add it again if that happens.
 
 Then pick a channel on each approval flow's page, as with Slack.
 
@@ -1285,11 +1422,14 @@ curl -fsSLO https://github.com/atoonk/tailscale-jit/releases/latest/download/jit
 curl -fsSLO https://github.com/atoonk/tailscale-jit/releases/latest/download/SHA256SUMS
 grep jitd-darwin-arm64 SHA256SUMS | shasum -a 256 -c -   # must say: OK
 install -m 755 jitd-darwin-arm64 jitd
-./jitd -admins group:jit-admins,you@example.com
+./jitd -admins group:jit-admins,you@example.com -env-file env
 ```
 
-No `TS_AUTHKEY`: `tsnet-state` and `jit.db` are in that directory already,
-so jitd comes back as the same machine with the same flows. To go back, run
+No `TS_AUTHKEY`: `tsnet-state`, `jit.db` and `env` are in that directory
+already, so jitd comes back as the same machine with the same flows and the
+same credential. Start it with the flags you used before — a dropped
+`-env-file` loses the Tailscale credential, and a changed `-admins` loses
+your admin access. To go back, run
 `install -m 755 jitd.prev jitd` and start it again.
 
 ---
